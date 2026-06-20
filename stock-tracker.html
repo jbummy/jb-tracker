@@ -5,7 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
   <meta name="theme-color" content="#0a0f1e"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="주식트래커"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <title>주식 매매 트래커</title>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='32' fill='%236366f1'/%3E%3Ctext x='96' y='135' font-size='110' text-anchor='middle'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E"/>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{background:#0a0f1e;color:#e2e8f0;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -13,6 +17,7 @@
     #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:#0a0f1e;z-index:9999}
     .spin{width:44px;height:44px;border:3px solid #1e293b;border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
     ::-webkit-scrollbar{width:4px;height:4px}
     ::-webkit-scrollbar-track{background:#0f172a}
     ::-webkit-scrollbar-thumb{background:#334155;border-radius:2px}
@@ -20,10 +25,6 @@
     button{-webkit-tap-highlight-color:transparent;touch-action:manipulation}
     select{-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:26px!important}
   </style>
-  <link rel="manifest" href="manifest.json"/>
-  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='32' fill='%236366f1'/%3E%3Ctext x='96' y='135' font-size='110' text-anchor='middle'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E"/>
-  <meta name="apple-mobile-web-app-title" content="주식트래커"/>
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 </head>
 <body>
   <div id="loading">
@@ -39,6 +40,8 @@
     ['React',    'https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js'],
     ['ReactDOM', 'https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js'],
     ['XLSX',     'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'],
+    ['FirebaseApp', 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js'],
+    ['FirebaseFirestore', 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js'],
     ['Babel',    'https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.0/babel.min.js']
   ];
   var i = 0;
@@ -80,6 +83,58 @@
 
   <script id="jsx-src" type="text/plain">
 const { useState, useEffect, useRef } = window.React;
+
+
+// ─── Firebase Firestore 동기화 ─────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyB5mrIIWTHZkXXg2coHpDMdW5eMNnKSQrg",
+  authDomain: "jb-tracker-27bed.firebaseapp.com",
+  projectId: "jb-tracker-27bed",
+  storageBucket: "jb-tracker-27bed.firebasestorage.app",
+  messagingSenderId: "163259297973",
+  appId: "1:163259297973:web:46a3f904417aa63acb8efc"
+};
+const SYNC_DOC_ID = "main"; // 단일 사용자용 고정 문서 ID
+
+function getFirestoreDb() {
+  try {
+    if (!window._fbApp) {
+      window._fbApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+      window._fbDb = window.firebase.firestore();
+    }
+    return window._fbDb;
+  } catch(e) {
+    console.error("Firebase init error:", e);
+    return null;
+  }
+}
+
+async function syncPush(data) {
+  try {
+    const db = getFirestoreDb();
+    if (!db) return false;
+    await db.collection("stockTracker").doc(SYNC_DOC_ID).set({
+      ...data,
+      _updatedAt: Date.now()
+    });
+    return true;
+  } catch(e) {
+    console.error("Sync push error:", e);
+    return false;
+  }
+}
+
+async function syncPull() {
+  try {
+    const db = getFirestoreDb();
+    if (!db) return null;
+    const doc = await db.collection("stockTracker").doc(SYNC_DOC_ID).get();
+    return doc.exists ? doc.data() : null;
+  } catch(e) {
+    console.error("Sync pull error:", e);
+    return null;
+  }
+}
 
 // ─── 상수 ────────────────────────────────────────────────────────────────────
 const STORAGE_KEY = "stock-trades-v2";
@@ -366,6 +421,10 @@ function App() {
   // 백업
   const [showBackup,setShowBackup]=useState(false); const [importMsg,setImportMsg]=useState(""); const [importMode,setImportMode]=useState("merge");
   const fileRef=useRef();
+  // 동기화
+  const [syncStatus,setSyncStatus]=useState("idle"); // idle | syncing | synced | error
+  const [syncReady,setSyncReady]=useState(false); // 최초 pull 완료 여부 (이전엔 push 막음)
+  const syncTimerRef=useRef(null);
 
   // ── Effects ──
   useEffect(()=>{localStorage.setItem(STORAGE_KEY,JSON.stringify(trades));},[trades]);
@@ -375,6 +434,41 @@ function App() {
   useEffect(()=>{localStorage.setItem("target-rate",targetRate);},[targetRate]);
   useEffect(()=>{localStorage.setItem("spy-buy",spyBuyPrice);},[spyBuyPrice]);
   useEffect(()=>{localStorage.setItem("pnl-log",JSON.stringify(pnlLog));},[pnlLog]);
+
+  // 최초 로드시 Firestore에서 데이터 가져오기 (있으면 로컬보다 우선)
+  useEffect(()=>{
+    let cancelled = false;
+    (async()=>{
+      setSyncStatus("syncing");
+      const remote = await syncPull();
+      if(cancelled) return;
+      if(remote){
+        if(remote.trades) setTrades(remote.trades);
+        if(remote.evalAccounts) setEvalAccounts(remote.evalAccounts);
+        if(remote.evalLog) setEvalLog(remote.evalLog);
+        if(remote.totalInvestInput!=null) setTotalInvestInput(remote.totalInvestInput);
+        if(remote.targetRate) setTargetRate(remote.targetRate);
+        if(remote.pnlLog) setPnlLog(remote.pnlLog);
+        setSyncStatus("synced");
+      } else {
+        setSyncStatus("idle");
+      }
+      setSyncReady(true);
+    })();
+    return ()=>{cancelled=true;};
+  },[]);
+
+  // 데이터 변경시 Firestore로 동기화 (디바운스 1.5초)
+  useEffect(()=>{
+    if(!syncReady) return; // 최초 pull 완료 전에는 push 안함 (덮어쓰기 방지)
+    if(syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    setSyncStatus("syncing");
+    syncTimerRef.current = setTimeout(async()=>{
+      const ok = await syncPush({trades,evalAccounts,evalLog,totalInvestInput,targetRate,pnlLog});
+      setSyncStatus(ok?"synced":"error");
+    }, 1500);
+    return ()=>{ if(syncTimerRef.current) clearTimeout(syncTimerRef.current); };
+  },[trades,evalAccounts,evalLog,totalInvestInput,targetRate,pnlLog,syncReady]);
 
   // 모바일 뷰포트 설정
   useEffect(()=>{
@@ -542,6 +636,9 @@ function App() {
             <div style={{fontSize:10,color:C.muted,marginTop:1,whiteSpace:"nowrap"}}>체결문자 파싱 · 손익 분석</div>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+            <div title={syncStatus==="synced"?"동기화 완료":syncStatus==="syncing"?"동기화 중...":syncStatus==="error"?"동기화 실패":"대기"}
+              style={{width:8,height:8,borderRadius:"50%",flexShrink:0,
+                background:syncStatus==="synced"?C.green:syncStatus==="syncing"?C.yellow:syncStatus==="error"?C.red:"#475569"}}/>
             <div style={{background:"#1e293b",borderRadius:7,padding:"4px 10px",fontSize:11,color:"#94a3b8",whiteSpace:"nowrap"}}>총 {trades.length}건</div>
             <button onClick={()=>setShowBackup(true)} title="백업/복원" style={{width:34,height:34,borderRadius:8,border:"none",cursor:"pointer",background:"#1e293b",color:"#94a3b8",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>💾</button>
           </div>
