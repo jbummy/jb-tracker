@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <meta name="theme-color" content="#0a0f1e"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="주식트래커"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>주식 매매 트래커</title>
+  <link rel="manifest" href="manifest.json"/>
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='32' fill='%236366f1'/%3E%3Ctext x='96' y='135' font-size='110' text-anchor='middle'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0a0f1e;color:#e2e8f0;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    #root{min-height:100vh}
+    #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:#0a0f1e;z-index:9999}
+    .spin{width:44px;height:44px;border:3px solid #1e293b;border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    ::-webkit-scrollbar{width:4px;height:4px}
+    ::-webkit-scrollbar-track{background:#0f172a}
+    ::-webkit-scrollbar-thumb{background:#334155;border-radius:2px}
+    input,select,textarea,button{font-family:inherit}
+    button{-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    select{-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:26px!important}
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spin"></div>
+    <div style="color:#6366f1;font-size:16px;font-weight:700">📈 주식 트래커</div>
+    <div id="load-msg" style="color:#64748b;font-size:13px">로딩 중...</div>
+    <div id="load-err" style="display:none;background:#2d0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px;color:#f87171;font-size:12px;max-width:300px;margin-top:8px;text-align:center"></div>
+  </div>
+  <div id="root"></div>
+
+  <script>
+  var CDNS = [
+    ['React',    'https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js'],
+    ['ReactDOM', 'https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js'],
+    ['XLSX',     'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'],
+    ['FirebaseApp', 'https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js'],
+    ['FirebaseFirestore', 'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js'],
+    ['Babel',    'https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.0/babel.min.js']
+  ];
+  var i = 0;
+  function loadNext() {
+    if (i >= CDNS.length) { compile(); return; }
+    var name = CDNS[i][0], url = CDNS[i][1];
+    document.getElementById('load-msg').textContent = name + ' 로드 중...';
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function(){ i++; loadNext(); };
+    s.onerror = function(){
+      showErr(name + ' 로드 실패\n인터넷 연결 확인 후 새로고침 하세요');
+    };
+    document.head.appendChild(s);
+  }
+  function compile() {
+    document.getElementById('load-msg').textContent = 'JSX 컴파일 중...';
+    setTimeout(function(){
+      try {
+        var src = document.getElementById('jsx-src').textContent;
+        var out = window.Babel.transform(src, {presets:['react'],filename:'app.jsx'}).code;
+        var s = document.createElement('script');
+        s.textContent = out;
+        document.head.appendChild(s);
+      } catch(e) {
+        showErr('컴파일 오류: ' + e.message);
+        console.error(e);
+      }
+    }, 50);
+  }
+  function showErr(msg){
+    var el = document.getElementById('load-err');
+    el.style.display='block'; el.textContent=msg;
+    console.error(msg);
+  }
+  window.addEventListener('error', function(e){ showErr(e.message); return false; });
+  loadNext();
+  </script>
+
+  <script id="jsx-src" type="text/plain">
+const { useState, useEffect, useRef } = window.React;
+
+
+// ─── Firebase Firestore 동기화 ─────────────────────────────────────────────────
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyB5mrIIWTHZkXXg2coHpDMdW5eMNnKSQrg",
+  authDomain: "jb-tracker-27bed.firebaseapp.com",
+  projectId: "jb-tracker-27bed",
+  storageBucket: "jb-tracker-27bed.firebasestorage.app",
+  messagingSenderId: "163259297973",
+  appId: "1:163259297973:web:46a3f904417aa63acb8efc"
+};
+const SYNC_DOC_ID = "main"; // 단일 사용자용 고정 문서 ID
+
+function getFirestoreDb() {
+  try {
+    if (!window._fbApp) {
+      window._fbApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+      window._fbDb = window.firebase.firestore();
+    }
+    return window._fbDb;
+  } catch(e) {
+    console.error("Firebase init error:", e);
+    return null;
+  }
+}
+
+async function syncPush(data) {
+  try {
+    const db = getFirestoreDb();
+    if (!db) return false;
+    await db.collection("stockTracker").doc(SYNC_DOC_ID).set({
+      ...data,
+      _updatedAt: Date.now()
+    });
+    return true;
+  } catch(e) {
+    console.error("Sync push error:", e);
+    return false;
+  }
+}
+
+async function syncPull() {
+  try {
+    const db = getFirestoreDb();
+    if (!db) return null;
+    const doc = await db.collection("stockTracker").doc(SYNC_DOC_ID).get();
+    return doc.exists ? doc.data() : null;
+  } catch(e) {
+    console.error("Sync pull error:", e);
+    return null;
+  }
+}
+
+// ─── 상수 ────────────────────────────────────────────────────────────────────
+const STORAGE_KEY = "stock-trades-v2";
+const TRADE_COLS  = ["id","broker","account","date","ticker","tradeType","qty","price","amount","currency"];
+const EMPTY_FORM  = { broker:"", account:"", date:"", ticker:"", tradeType:"매수", qty:"", price:"", amount:"", currency:"USD" };
+const C = {
+  bg:"#0a0f1e", bg2:"#0f172a", bg3:"#111827",
+  border:"#1e293b", border2:"#334155",
+  purple:"#6366f1", purpleL:"#8b5cf6",
+  text:"#e2e8f0", muted:"#64748b", dim:"#475569",
+  green:"#4ade80", red:"#f87171", yellow:"#fbbf24"
+};
+const CHART_COLORS = ["#6366f1","#06b6d4","#f59e0b","#10b981","#f87171","#a78bfa"];
+
+// ─── 유틸 ─────────────────────────────────────────────────────────────────────
+function toCSV(rows, cols) {
+  const e = v => v==null?"": /[,"\n]/.test(String(v))?`"${String(v).replace(/"/g,'""')}"`:String(v);
+  return [cols.join(","), ...rows.map(r=>cols.map(c=>e(r[c])).join(","))].join("\n");
+}
+function fromCSV(text, cols) {
+  const lines = text.trim().split(/\r?\n/); if(lines.length<2) return [];
+  const hdr = lines[0].split(",").map(s=>s.trim());
+  return lines.slice(1).map(line=>{
+    const vals=[]; let cur="",inQ=false;
+    for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"'){inQ&&line[i+1]==='"'?(cur+='"',i++):(inQ=!inQ);}else if(ch===","&&!inQ){vals.push(cur);cur="";}else cur+=ch;}
+    vals.push(cur);
+    const obj={}; hdr.forEach((h,i)=>{obj[h]=vals[i]??"";});
+    const row={}; cols.forEach(c=>{const v=obj[c]??""; row[c]=c==="qty"?parseInt(v)||0:["price","amount"].includes(c)?parseFloat(v)||0:v;}); return row;
+  });
+}
+function normDate(raw) {
+  if(!raw) return "";
+  const s=raw.trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m=s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  return m?`${new Date().getFullYear()}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`:s;
+}
+function parseSMS(raw) {
+  const t=raw.trim();
+  const broker=t.match(/\[(.+?)\]/)?.[1]||t.match(/^(\S+증권)/)?.[1]||"";
+  const acNum=t.match(/계좌번호\s*:\s*(\S+)/)?.[1]||t.match(/계좌명\s*:\s*(\S+)/)?.[1]||"";
+  const ticker=t.match(/\(([A-Z0-9.^]+)\)/)?.[1]||t.match(/종목명\s*:\s*(\S+)/)?.[1]||"?";
+  const tradeType=t.match(/매매구분\s*:\s*(\S+)/)?.[1]||"?";
+  const qty=parseInt(t.match(/체결수량\s*:\s*(\d+)/)?.[1]||"0");
+  const ps=t.match(/체결단가\s*:\s*([\w\s.]+?)(?=주문|체결|$)/)?.[1]?.trim()||"0";
+  const currency=ps.match(/(USD|KRW)/)?.[1]||"KRW";
+  const price=parseFloat(ps.replace(/[^\d.]/g,""))||0;
+  const as=t.match(/체결금액\s*:\s*([\w\s.,]+?)(?=체결일|$)/)?.[1]?.trim()||"0";
+  const amount=parseFloat(as.replace(/[^\d.]/g,""))||0;
+  const dateRaw=t.match(/체결일자\s*:\s*(\S+)/)?.[1]||"";
+  return {broker,account:acNum,date:normDate(dateRaw.replace(/\//g,"-")),ticker,tradeType,qty,price,amount,currency};
+}
+function fmt(n,cur="KRW"){
+  return cur==="USD"?`$${(+n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:
+    `₩${Math.round(n).toLocaleString()}`;
+}
+function fmtBroker(n){ return (n||"").replace(/증券.*|증권.*/,"").trim(); }
+function fmtMan(v){ const n=Math.round(parseFloat(v)||0); if(!n) return "-"; return `₩${n.toLocaleString()}만`; }
+function calcAvgRows(rows){
+  const s=[...rows].filter(r=>r&&r.date&&(r.tradeType==="매수"||r.tradeType==="매도")).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  let qty=0,cost=0,realized=0;
+  for(const r of s){
+    const rQty=Number.isFinite(r.qty)?r.qty:0;
+    const rPrice=Number.isFinite(r.price)?r.price:0;
+    const rAmount=Number.isFinite(r.amount)?r.amount:0;
+    if(r.tradeType==="매수"){cost+=rAmount;qty+=rQty;}
+    else{const avg=qty>0?cost/qty:0;realized+=(rPrice-avg)*rQty;cost-=avg*rQty;qty-=rQty;if(qty<0)qty=0;if(cost<0)cost=0;}
+  }
+  return{holdQty:qty,holdCost:cost,avgPrice:qty>0?cost/qty:0,realizedPnl:Number.isFinite(realized)?realized:0};
+}
+function dlFile(content, name, type="text/csv;charset=utf-8;") {
+  const blob=new Blob([type.includes("csv")?"\uFEFF"+content:content],{type});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a"); a.href=url; a.download=name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},300);
+}
+
+// ─── xlsx 백업 ────────────────────────────────────────────────────────────────
+function exportXlsx({trades,evalLog,pnlLog,evalAccounts,totalInvestInput,targetRate,spyBuyPrice,today}){
+  const wb=window.XLSX.utils.book_new();
+  window.XLSX.utils.book_append_sheet(wb,window.XLSX.utils.aoa_to_sheet([
+    ["id","증권사","계좌","날짜","티커","매매구분","수량","단가","금액","통화"],
+    ...trades.map(t=>[t.id,t.broker,t.account,t.date,t.ticker,t.tradeType,t.qty,t.price,t.amount,t.currency])
+  ]),"거래내역");
+  window.XLSX.utils.book_append_sheet(wb,window.XLSX.utils.aoa_to_sheet([
+    ["날짜","계좌","금액(만원)"],
+    ...(evalLog||[]).map(e=>[e.date,e.acc,e.amount])
+  ]),"평가액기록");
+  window.XLSX.utils.book_append_sheet(wb,window.XLSX.utils.aoa_to_sheet([
+    ["월(YYYY-MM)","금액(USD)"],
+    ...(pnlLog||[]).map(e=>[e.month,e.amount])
+  ]),"월별실현손익");
+  window.XLSX.utils.book_append_sheet(wb,window.XLSX.utils.aoa_to_sheet([
+    ["항목","값"],
+    ["계좌목록",(evalAccounts||[]).join(",")],
+    ["총투입금액(만원)",totalInvestInput||""],
+    ["목표수익률(%)",targetRate||""],
+    ["SPY매수가",spyBuyPrice||""],
+  ]),"설정값");
+  window.XLSX.writeFile(wb,`주식트래커_백업_${today}.xlsx`);
+}
+
+function importXlsx(file,{setTrades,setEvalLog,setPnlLog,setEvalAccounts,setTotalInvestInput,setTargetRate,setSpyBuyPrice,importMode,setImportMsg}){
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const wb=window.XLSX.read(e.target.result,{type:"array"});
+      // 거래내역
+      const ts=wb.Sheets["거래내역"];
+      if(ts){
+        let skipped=0;
+        const rows=window.XLSX.utils.sheet_to_json(ts).map(r=>{
+          const date=String(r["날짜"]||"").trim();
+          const ticker=String(r["티커"]||"").trim();
+          const tradeType=String(r["매매구분"]||"").trim();
+          const qty=parseInt(r["수량"]);
+          const price=parseFloat(r["단가"]);
+          const amount=parseFloat(r["금액"]);
+          return{
+            id:r["id"]||(Date.now()+Math.random()),
+            broker:String(r["증권사"]||""),account:String(r["계좌"]||""),
+            date,ticker,tradeType,
+            qty:Number.isFinite(qty)?qty:0,
+            price:Number.isFinite(price)?price:0,
+            amount:Number.isFinite(amount)?amount:0,
+            currency:String(r["통화"]||"USD"),
+          };
+        }).filter(r=>{
+          // 유효성 검증: 필수값 + 매매구분이 매수/매도 중 하나여야 함 + 수량 양수
+          const valid = r.ticker && r.date && (r.tradeType==="매수"||r.tradeType==="매도") && r.qty>0;
+          if(!valid) skipped++;
+          return valid;
+        });
+        if(skipped>0) console.warn(`거래내역 ${skipped}건 형식 오류로 건너뜀 (날짜/티커/매매구분/수량 확인 필요)`);
+        if(importMode==="replace") setTrades(rows);
+        else setTrades(p=>{const ids=new Set(p.map(t=>String(t.id)));return[...p,...rows.filter(r=>!ids.has(String(r.id)))];});
+      }
+      // 평가액
+      const es=wb.Sheets["평가액기록"];
+      if(es){
+        const logs=window.XLSX.utils.sheet_to_json(es).map(r=>{
+          const amt=parseFloat(r["금액(만원)"]);
+          return{date:String(r["날짜"]||"").trim(),acc:String(r["계좌"]||"").trim(),amount:Number.isFinite(amt)?amt:0};
+        }).filter(r=>r.date&&r.acc);
+        if(importMode==="replace") setEvalLog(logs);
+        else setEvalLog(p=>{const ex=new Set(p.map(x=>x.date+x.acc));return[...p,...logs.filter(r=>!ex.has(r.date+r.acc))];});
+      }
+      // 월별손익
+      const ps=wb.Sheets["월별실현손익"];
+      if(ps){
+        const logs=window.XLSX.utils.sheet_to_json(ps).map(r=>{
+          const amt=parseFloat(r["금액(USD)"]??r["금액(만원)"]);
+          return{month:String(r["월(YYYY-MM)"]||"").trim(),amount:Number.isFinite(amt)?amt:0};
+        }).filter(r=>r.month);
+        if(importMode==="replace") setPnlLog(logs);
+        else setPnlLog(p=>{const ex=new Set(p.map(x=>x.month));return[...p,...logs.filter(r=>!ex.has(r.month))];});
+      }
+      // 설정값
+      const ss=wb.Sheets["설정값"];
+      if(ss){
+        const map={};window.XLSX.utils.sheet_to_json(ss).forEach(r=>{map[r["항목"]]=r["값"];});
+        if(map["계좌목록"]) setEvalAccounts(String(map["계좌목록"]).split(",").map(s=>s.trim()));
+        if(map["총투입금액(만원)"]) setTotalInvestInput(String(map["총투입금액(만원)"]));
+        if(map["목표수익률(%)"]) setTargetRate(String(map["목표수익률(%)"]));
+        if(map["SPY매수가"]) setSpyBuyPrice(String(map["SPY매수가"]));
+      }
+      setImportMsg("✅ 복원 완료!");
+    }catch(err){setImportMsg("⚠ 파일 읽기 실패: "+err.message);}
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ─── 소형 컴포넌트 ────────────────────────────────────────────────────────────
+function ColorNum({val,cur}){
+  return <span style={{color:val>0?C.green:val<0?C.red:"#94a3b8",fontWeight:700}}>{val>0?"+":""}{fmt(val,cur)}</span>;
+}
+function Pill({children,active,onClick}){
+  return <button onClick={onClick} style={{padding:"6px 14px",borderRadius:8,border:`1px solid ${active?C.purple:"#1e293b"}`,cursor:"pointer",fontSize:12,fontWeight:600,whiteSpace:"nowrap",background:active?"#1e1b4b":"#0f172a",color:active?"#a5b4fc":"#64748b",transition:"all .15s"}}>{children}</button>;
+}
+function Btn({children,onClick,primary,style}){
+  return <button onClick={onClick} style={{padding:"9px 20px",borderRadius:10,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,background:primary?`linear-gradient(135deg,${C.purple},${C.purpleL})`:"#1e293b",color:primary?"#fff":C.muted,...style}}>{children}</button>;
+}
+function Field({label,value,onChange,type="text",placeholder}){
+  return <div><div style={{fontSize:12,color:C.muted,marginBottom:5}}>{label}</div>
+    <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+      style={{width:"100%",background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>;
+}
+function DatePicker({label,value,onChange}){
+  return <div><div style={{fontSize:12,color:C.muted,marginBottom:5}}>{label}</div>
+    <input type="date" value={value||""} onChange={e=>onChange(e.target.value)}
+      style={{width:"100%",background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"9px 12px",color:value?C.text:C.muted,fontSize:13,outline:"none",boxSizing:"border-box",colorScheme:"dark"}}/></div>;
+}
+function Th({children,onClick,active,dir}){
+  return <th onClick={onClick} style={{padding:"10px 10px",color:active?"#a5b4fc":C.dim,fontWeight:700,cursor:"pointer",textAlign:"left",whiteSpace:"nowrap",userSelect:"none",fontSize:11}}>{children}{active?(dir==="asc"?" ↑":" ↓"):""}</th>;
+}
+function Td({children,style}){return <td style={{padding:"9px 10px",color:"#cbd5e1",whiteSpace:"nowrap",...style}}>{children}</td>;}
+function Empty({text}){return <div style={{textAlign:"center",padding:48,color:"#334155",fontSize:14}}>{text}</div>;}
+
+function ComboBox({label,value,onChange,options,placeholder,required}){
+  const [open,setOpen]=useState(false); const [txt,setTxt]=useState(value||""); const ref=useRef();
+  useEffect(()=>{setTxt(value||"");},[value]);
+  useEffect(()=>{if(!open)return;const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};document.addEventListener("pointerdown",h,true);return()=>document.removeEventListener("pointerdown",h,true);},[open]);
+  const filtered=options.filter(o=>o&&o.toLowerCase().includes((txt||"").toLowerCase()));
+  const showNew=txt.trim()&&!options.some(o=>o.toLowerCase()===txt.trim().toLowerCase());
+  const pick=v=>{onChange(v);setTxt(v);setOpen(false);};
+  return <div ref={ref} style={{position:"relative"}}>
+    <div style={{fontSize:12,color:C.muted,marginBottom:5}}>{label}{required&&" *"}</div>
+    <div style={{position:"relative"}}>
+      <input value={txt} onChange={e=>{setTxt(e.target.value);onChange(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} placeholder={placeholder}
+        style={{width:"100%",background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"9px 34px 9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+      <span onPointerDown={e=>{e.stopPropagation();setOpen(v=>!v);}} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",cursor:"pointer",color:C.dim,fontSize:11,padding:4}}>{open?"▲":"▼"}</span>
+    </div>
+    {open&&(filtered.length>0||showNew)&&<div style={{position:"absolute",zIndex:300,top:"calc(100% + 4px)",left:0,right:0,background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:10,overflow:"hidden",boxShadow:"0 8px 24px #00000088"}}>
+      {filtered.map(o=><div key={o} onPointerDown={e=>{e.preventDefault();pick(o);}}
+        style={{padding:"10px 14px",cursor:"pointer",fontSize:13,color:o===value?"#a5b4fc":C.text,fontWeight:o===value?700:400,background:o===value?"#1e1b4b":"transparent"}}
+        onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background=o===value?"#1e1b4b":"transparent"}>{o}</div>)}
+      {showNew&&<div onPointerDown={e=>{e.preventDefault();pick(txt.trim());}}
+        style={{padding:"10px 14px",cursor:"pointer",fontSize:13,color:C.green,borderTop:`1px solid ${C.border2}`}}
+        onMouseEnter={e=>e.currentTarget.style.background="#052e16"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>+ "{txt.trim()}" 추가</div>}
+    </div>}
+  </div>;
+}
+
+// 툴팁 컴포넌트 (렌더 밖에서 정의)
+function EvalTooltip({active,payload,label}){
+  if(!active||!payload?.length) return null;
+  const fY=v=>{const n=Math.round(v);return n>=10000?`${(n/10000).toFixed(1)}억`:n>=1000?`${(n/1000).toFixed(0)}천만`:`${n}만`;};
+  return <div style={{background:"#0f172a",border:"1px solid #334155",borderRadius:10,padding:"10px 14px",fontSize:12}}>
+    <div style={{color:"#64748b",marginBottom:6,fontWeight:600}}>{label}</div>
+    {payload.map(p=>p.value!=null&&<div key={p.name} style={{display:"flex",justifyContent:"space-between",gap:12,color:p.color,marginBottom:3}}>
+      <span>{p.name}</span><span style={{fontWeight:700}}>{fY(p.value)}</span>
+    </div>)}
+  </div>;
+}
+
+// ─── 원형 차트 컴포넌트 ──────────────────────────────────────────────────────
+function PieChart({items,title,colorOffset=0,drillTicker,setDrillTicker}){
+  if(!items.length) return null;
+  const total=items.reduce((s,x)=>s+Math.abs(x.realizedPnl),0);
+  if(total===0) return null;
+  const R=80,CX=100,CY=100;
+  let angle=-Math.PI/2;
+  const slices=items.map((item,i)=>{
+    const pct=Math.abs(item.realizedPnl)/total;
+    const start=angle; angle+=pct*2*Math.PI;
+    const x1=CX+R*Math.cos(start),y1=CY+R*Math.sin(start);
+    const x2=CX+R*Math.cos(angle),y2=CY+R*Math.sin(angle);
+    const large=pct>0.5?1:0;
+    const midA=start+pct*Math.PI;
+    return{item,path:`M${CX},${CY} L${x1},${y1} A${R},${R},0,${large},1,${x2},${y2} Z`,
+      color:CHART_COLORS[(i+colorOffset)%CHART_COLORS.length],pct,lx:CX+(R+18)*Math.cos(midA),ly:CY+(R+18)*Math.sin(midA),isSelected:drillTicker===item.ticker};
+  });
+  const cur=items[0]?.cur||"USD";
+  return <div style={{flex:1,minWidth:260,background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:20}}>
+    <div style={{fontSize:13,fontWeight:700,color:"#a5b4fc",marginBottom:4}}>{title}</div>
+    <div style={{fontSize:11,color:C.muted,marginBottom:12}}>종목 클릭 → 월별 현황</div>
+    <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
+      <svg width="200" height="200" viewBox="0 0 200 200" style={{flexShrink:0,cursor:"pointer"}}>
+        {slices.map((sl,i)=><g key={i} onClick={()=>setDrillTicker(drillTicker===sl.item.ticker?null:sl.item.ticker)} style={{cursor:"pointer"}}>
+          <path d={sl.path} fill={sl.color} opacity={drillTicker&&!sl.isSelected?0.35:0.92} stroke={sl.isSelected?"#fff":"none"} strokeWidth={sl.isSelected?2:0}/>
+          {sl.pct>0.06&&<text x={sl.lx} y={sl.ly} textAnchor="middle" dominantBaseline="middle" style={{fontSize:"9px",fill:"#e2e8f0",fontWeight:700,pointerEvents:"none"}}>{(sl.pct*100).toFixed(0)}%</text>}
+        </g>)}
+        <circle cx={CX} cy={CY} r={38} fill={C.bg2} style={{pointerEvents:"none"}}/>
+        <text x={CX} y={CY-6} textAnchor="middle" style={{fontSize:"9px",fill:"#64748b",pointerEvents:"none"}}>총</text>
+        <text x={CX} y={CY+8} textAnchor="middle" style={{fontSize:"10px",fill:"#e2e8f0",fontWeight:"bold",pointerEvents:"none"}}>{fmt(items.reduce((s,x)=>s+x.realizedPnl,0),cur)}</text>
+      </svg>
+      <div style={{flex:1,minWidth:120}}>
+        {slices.map((sl,i)=><div key={i} onClick={()=>setDrillTicker(drillTicker===sl.item.ticker?null:sl.item.ticker)}
+          style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,cursor:"pointer",opacity:drillTicker&&drillTicker!==sl.item.ticker?0.4:1,
+            background:sl.isSelected?"#1e1b4b":"transparent",borderRadius:6,padding:"3px 6px",transition:"all .15s"}}>
+          <div style={{width:10,height:10,borderRadius:2,background:sl.color,flexShrink:0}}/>
+          <span style={{fontSize:12,color:sl.isSelected?"#a5b4fc":"#94a3b8",flex:1,fontWeight:sl.isSelected?700:400}}>{sl.item.ticker}</span>
+          <ColorNum val={sl.item.realizedPnl} cur={cur}/>
+        </div>)}
+      </div>
+    </div>
+  </div>;
+}
+
+
+// ─── 에러 바운더리 ─────────────────────────────────────────────────────────────
+class ErrorBoundary extends window.React.Component {
+  constructor(props){ super(props); this.state = { hasError:false, errMsg:"" }; }
+  static getDerivedStateFromError(err){ return { hasError:true, errMsg:String(err?.message||err) }; }
+  componentDidCatch(err, info){ console.error("App crashed:", err, info); }
+  handleReset(){
+    if(window.confirm("앱 데이터를 초기화하면 문제가 해결될 수 있습니다.\n(거래내역 등 로컬 데이터가 삭제됩니다 - 클라우드 백업이 있다면 복구 가능)\n초기화 하시겠습니까?")){
+      try{ localStorage.clear(); }catch(e){}
+      window.location.reload();
+    }
+  }
+  render(){
+    if(this.state.hasError){
+      return window.React.createElement("div", {
+        style:{minHeight:"100vh",background:"#0a0f1e",color:"#e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16,padding:24,textAlign:"center",fontFamily:"sans-serif"}
+      },
+        window.React.createElement("div", {style:{fontSize:40}}, "⚠️"),
+        window.React.createElement("div", {style:{fontSize:18,fontWeight:700,color:"#f87171"}}, "오류가 발생했습니다"),
+        window.React.createElement("div", {style:{fontSize:13,color:"#94a3b8",maxWidth:400,wordBreak:"break-word",background:"#1e293b",padding:"12px 16px",borderRadius:8}}, this.state.errMsg),
+        window.React.createElement("div", {style:{fontSize:12,color:"#64748b",maxWidth:360,lineHeight:1.6}},
+          "엑셀 파일을 직접 수정하신 경우, 날짜/티커/매매구분/수량 칸이 비어있거나 잘못된 값이 있는지 확인해주세요."
+        ),
+        window.React.createElement("button", {
+          onClick:()=>window.location.reload(),
+          style:{padding:"10px 24px",borderRadius:10,border:"none",cursor:"pointer",fontSize:14,fontWeight:700,background:"#6366f1",color:"#fff",marginTop:8}
+        }, "🔄 새로고침"),
+        window.React.createElement("button", {
+          onClick:()=>this.handleReset(),
+          style:{padding:"10px 24px",borderRadius:10,border:"1px solid #7f1d1d",cursor:"pointer",fontSize:13,fontWeight:600,background:"transparent",color:"#f87171"}
+        }, "🗑 로컬 데이터 초기화 후 새로고침")
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ─── 메인 ─────────────────────────────────────────────────────────────────────
+function App() {
+  // ── State ──
+  const [trades,setTrades]=useState(()=>{try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");}catch{return [];}});
+  const [tab,setTab]=useState("입력");
+
+  // 입력
+  const [sms,setSms]=useState(""); const [parsed,setParsed]=useState(null); const [parseErr,setParseErr]=useState("");
+  // 거래내역
+  const [fAcc,setFAcc]=useState("전체"); const [sortCol,setSortCol]=useState("date"); const [sortDir,setSortDir]=useState("desc");
+  const [showForm,setShowForm]=useState(false); const [form,setForm]=useState(EMPTY_FORM);
+  const [formErr,setFormErr]=useState(""); const [editId,setEditId]=useState(null); const [dlg,setDlg]=useState(null);
+  // 손익트래킹
+  const [rptPeriod,setRptPeriod]=useState("현재까지"); const [rptAcc,setRptAcc]=useState("전체"); const [rptTicker,setRptTicker]=useState("전체");
+  const [drillTicker,setDrillTicker]=useState(null);
+  // 요약 — 평가액
+  const [evalAccounts,setEvalAccounts]=useState(()=>{try{return JSON.parse(localStorage.getItem("eval-accounts")||"null")||["메리츠","나무","키움","키움(쭈)"];}catch{return["메리츠","나무","키움","키움(쭈)"];}});
+  const [evalLog,setEvalLog]=useState(()=>{try{return JSON.parse(localStorage.getItem("eval-log")||"[]");}catch{return[];}});
+  const [evalDate,setEvalDate]=useState(()=>new Date().toISOString().slice(0,10));
+  const [evalForm,setEvalForm]=useState({});
+  const [showAddAcc,setShowAddAcc]=useState(false); const [newAccName,setNewAccName]=useState("");
+  // 요약 — 목표/SPY
+  const [totalInvestInput,setTotalInvestInput]=useState(()=>localStorage.getItem("total-invest")||"");
+  const [targetRate,setTargetRate]=useState(()=>localStorage.getItem("target-rate")||"20");
+  const [spyBuyPrice,setSpyBuyPrice]=useState(()=>localStorage.getItem("spy-buy")||"");
+  // 요약 — 월별 손익
+  const [pnlLog,setPnlLog]=useState(()=>{try{return JSON.parse(localStorage.getItem("pnl-log")||"[]");}catch{return[];}});
+  const [pnlForm2,setPnlForm2]=useState({month:"",amount:""});
+  const [pnlPeriodSel,setPnlPeriodSel]=useState("전체");
+  const [showPnlInput,setShowPnlInput]=useState(false);
+  // 백업
+  const [showBackup,setShowBackup]=useState(false); const [importMsg,setImportMsg]=useState(""); const [importMode,setImportMode]=useState("merge");
+  const fileRef=useRef();
+  // 동기화
+  const [syncStatus,setSyncStatus]=useState("idle"); // idle | syncing | synced | error
+  const [syncErrMsg,setSyncErrMsg]=useState("");
+  const [syncReady,setSyncReady]=useState(false); // 최초 pull 완료 여부 (이전엔 push 막음)
+  const syncTimerRef=useRef(null);
+
+  // ── Effects ──
+  useEffect(()=>{localStorage.setItem(STORAGE_KEY,JSON.stringify(trades));},[trades]);
+  useEffect(()=>{localStorage.setItem("eval-accounts",JSON.stringify(evalAccounts));},[evalAccounts]);
+  useEffect(()=>{localStorage.setItem("eval-log",JSON.stringify(evalLog));},[evalLog]);
+  useEffect(()=>{localStorage.setItem("total-invest",totalInvestInput);},[totalInvestInput]);
+  useEffect(()=>{localStorage.setItem("target-rate",targetRate);},[targetRate]);
+  useEffect(()=>{localStorage.setItem("spy-buy",spyBuyPrice);},[spyBuyPrice]);
+  useEffect(()=>{localStorage.setItem("pnl-log",JSON.stringify(pnlLog));},[pnlLog]);
+
+  // 최초 로드시 Firestore에서 데이터 가져오기 (있으면 로컬보다 우선)
+  useEffect(()=>{
+    let cancelled = false;
+    (async()=>{
+      setSyncStatus("syncing");
+      try{
+        const remote = await syncPull();
+        if(cancelled) return;
+        if(remote){
+          if(remote.trades) setTrades(remote.trades);
+          if(remote.evalAccounts) setEvalAccounts(remote.evalAccounts);
+          if(remote.evalLog) setEvalLog(remote.evalLog);
+          if(remote.totalInvestInput!=null) setTotalInvestInput(remote.totalInvestInput);
+          if(remote.targetRate) setTargetRate(remote.targetRate);
+          if(remote.pnlLog) setPnlLog(remote.pnlLog);
+          setSyncStatus("synced");
+        } else {
+          setSyncStatus("idle"); // 클라우드에 데이터가 아직 없음 (최초 1회)
+        }
+      }catch(e){
+        setSyncStatus("error");
+        setSyncErrMsg(String(e?.message||e));
+      }
+      setSyncReady(true);
+    })();
+    return ()=>{cancelled=true;};
+  },[]);
+
+  // 데이터 변경시 Firestore로 동기화 (디바운스 1.5초)
+  useEffect(()=>{
+    if(!syncReady) return; // 최초 pull 완료 전에는 push 안함 (덮어쓰기 방지)
+    if(syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    setSyncStatus("syncing");
+    syncTimerRef.current = setTimeout(async()=>{
+      try{
+        const ok = await syncPush({trades,evalAccounts,evalLog,totalInvestInput,targetRate,pnlLog});
+        if(ok){ setSyncStatus("synced"); setSyncErrMsg(""); }
+        else { setSyncStatus("error"); setSyncErrMsg("저장 실패 (콘솔 확인)"); }
+      }catch(e){
+        setSyncStatus("error");
+        setSyncErrMsg(String(e?.message||e));
+      }
+    }, 1500);
+    return ()=>{ if(syncTimerRef.current) clearTimeout(syncTimerRef.current); };
+  },[trades,evalAccounts,evalLog,totalInvestInput,targetRate,pnlLog,syncReady]);
+
+  // 모바일 뷰포트 설정
+  useEffect(()=>{
+    let meta = document.querySelector('meta[name="viewport"]');
+    if(!meta){ meta=document.createElement('meta'); meta.name="viewport"; document.head.appendChild(meta); }
+    meta.content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no";
+    // 모바일 터치 스크롤 개선
+    document.body.style.overscrollBehavior="none";
+    return()=>{ document.body.style.overscrollBehavior=""; };
+  },[]);
+
+  // ── 파생 ──
+  const allAccounts=["전체",...new Set(trades.map(t=>t.account))];
+  const brokerOpts=[...new Set(trades.map(t=>t.broker).filter(Boolean))];
+  const accountOpts=[...new Set(trades.map(t=>t.account).filter(Boolean))];
+  const tickerOpts=[...new Set(trades.map(t=>t.ticker).filter(Boolean))];
+  const today2=new Date().toISOString().slice(0,10);
+
+  // ── 문자 파싱 ──
+  const doParse=text=>{setParseErr("");try{const r=parseSMS(text);if(r.ticker==="?"||r.qty===0)throw new Error("종목/수량 없음");setParsed(r);}catch(e){setParseErr(e.message);}};
+  const saveSMS=()=>{if(!parsed)return;setTrades(p=>[...p,{...parsed,id:Date.now()}]);setSms("");setParsed(null);};
+
+  // ── 수동 폼 ──
+  const setF=(k,v)=>setForm(f=>{const n={...f,[k]:v};if(k==="qty"||k==="price"){const q=parseFloat(k==="qty"?v:n.qty)||0;const p=parseFloat(k==="price"?v:n.price)||0;if(q&&p)n.amount=(q*p).toFixed(2);}return n;});
+  const openNew=()=>{setForm(EMPTY_FORM);setEditId(null);setFormErr("");setShowForm(true);};
+  const saveForm=()=>{
+    if(!form.ticker.trim()){setFormErr("종목 티커 입력");return;}
+    if(!form.date){setFormErr("날짜 입력");return;}
+    if(!parseFloat(form.qty)){setFormErr("수량 입력");return;}
+    const row={...form,qty:parseInt(form.qty)||0,price:parseFloat(form.price)||0,amount:parseFloat(form.amount)||0};
+    if(editId!==null)setTrades(p=>p.map(t=>t.id===editId?{...row,id:editId}:t));
+    else setTrades(p=>[...p,{...row,id:Date.now()}]);
+    setForm(EMPTY_FORM);setEditId(null);setShowForm(false);
+  };
+  const startEdit=t=>{setForm({broker:t.broker,account:t.account,date:t.date,ticker:t.ticker,tradeType:t.tradeType,qty:String(t.qty),price:String(t.price),amount:String(t.amount),currency:t.currency});setEditId(t.id);setFormErr("");setShowForm(true);};
+  const askDel=(msg,fn)=>setDlg({msg,fn});
+  const delTrade=id=>{const t=trades.find(x=>x.id===id);askDel(`[${t?.ticker}] ${t?.date} ${t?.tradeType} ${t?.qty}주 거래를 삭제할까요?`,()=>setTrades(p=>p.filter(x=>x.id!==id)));};
+
+  // ── 정렬 ──
+  const sorted=[...trades].filter(t=>fAcc==="전체"||t.account===fAcc).sort((a,b)=>{let av=a[sortCol],bv=b[sortCol];if(typeof av==="string"){av=av.toLowerCase();bv=bv.toLowerCase();}return sortDir==="asc"?(av>bv?1:-1):(av<bv?1:-1);});
+  const togSort=col=>{if(sortCol===col)setSortDir(d=>d==="asc"?"desc":"asc");else{setSortCol(col);setSortDir("asc");}};
+
+  // ── 종목별 현황 (전체) ──
+  const tickerSummary=[...new Set(trades.map(t=>t.ticker))].map(tk=>{
+    const{holdQty,avgPrice,realizedPnl}=calcAvgRows(trades.filter(t=>t.ticker===tk));
+    return{ticker:tk,holdQty,avgPrice,realizedPnl,cur:trades.find(t=>t.ticker===tk)?.currency||"USD"};
+  }).filter(s=>s.holdQty>0);
+
+  // ── 손익트래킹 ──
+  const now=new Date(),yy=now.getFullYear(),mm=String(now.getMonth()+1).padStart(2,"0"),today3=now.toISOString().slice(0,10);
+  const PERIODS={"이번달":{from:`${yy}-${mm}-01`,to:today3},"올해":{from:`${yy}-01-01`,to:today3},"작년":{from:`${yy-1}-01-01`,to:`${yy-1}-12-31`},"현재까지":{from:"",to:""}};
+  const period=PERIODS[rptPeriod]||PERIODS["현재까지"];
+  const rptTrades=trades.filter(t=>{
+    if(rptAcc!=="전체"&&t.account!==rptAcc)return false;
+    if(rptTicker!=="전체"&&t.ticker!==rptTicker)return false;
+    if(period.from&&t.date<period.from)return false;
+    if(period.to&&t.date>period.to)return false;
+    return true;
+  });
+  const rptTickers=[...new Set(rptTrades.map(t=>t.ticker))];
+  const rptAccs=[...new Set(rptTrades.map(t=>t.account))];
+  const tickerStats=rptTickers.map(tk=>{
+    const{holdQty,avgPrice,realizedPnl}=calcAvgRows(rptTrades.filter(t=>t.ticker===tk));
+    return{ticker:tk,holdQty,avgPrice,realizedPnl,total:realizedPnl,cur:trades.find(t=>t.ticker===tk)?.currency||"USD"};
+  });
+  const accStats=rptAccs.map(acc=>{
+    const rows=rptTrades.filter(t=>t.account===acc);
+    const real=([...new Set(rows.map(t=>t.ticker))]).reduce((s,tk)=>{const{realizedPnl}=calcAvgRows(rows.filter(t=>t.ticker===tk));return s+realizedPnl;},0);
+    return{acc,realized:real,cur:rows[0]?.currency||"USD"};
+  });
+  const grandCur=tickerStats[0]?.cur||"USD";
+  const grandReal=tickerStats.reduce((s,x)=>s+x.realizedPnl,0);
+  const maxT=Math.max(...tickerStats.map(x=>Math.abs(x.realizedPnl)),1);
+  const maxA=Math.max(...accStats.map(x=>Math.abs(x.realized)),1);
+
+  // 드릴다운
+  const monthlyPnl=ticker=>{
+    const rows=rptTrades.filter(t=>t.ticker===ticker).sort((a,b)=>a.date.localeCompare(b.date));
+    const monthMap={};let holdQty=0,holdCost=0;
+    for(const r of rows){
+      const ym=r.date.slice(0,7);
+      if(!monthMap[ym])monthMap[ym]=0;
+      if(r.tradeType==="매수"){holdCost+=r.amount;holdQty+=r.qty;}
+      else{const avg=holdQty>0?holdCost/holdQty:0;monthMap[ym]+=(r.price-avg)*r.qty;holdCost-=avg*r.qty;holdQty-=r.qty;if(holdQty<0)holdQty=0;if(holdCost<0)holdCost=0;}
+    }
+    return Object.entries(monthMap).sort(([a],[b])=>a.localeCompare(b));
+  };
+
+  // ── 요약 — 평가액 ──
+  const dates=[...new Set(evalLog.map(e=>e.date))].sort((a,b)=>b.localeCompare(a));
+  const latest=dates[0];
+  const latestTotal=evalLog.filter(e=>e.date===latest).reduce((s,e)=>s+(e.amount||0),0);
+  const sortedDates=[...dates].reverse();
+  const totals=sortedDates.map(d=>({d,v:evalLog.filter(e=>e.date===d).reduce((s,e)=>s+(e.amount||0),0)}));
+  const totalInvest=parseFloat(totalInvestInput)||0;
+  const targetPct=parseFloat(targetRate)||0;
+  const targetAmt=totalInvest>0?totalInvest*(1+targetPct/100):null;
+  const gainAmt=totalInvest>0?latestTotal-totalInvest:null;
+  const gainPct=totalInvest>0?(latestTotal/totalInvest-1)*100:null;
+  const achievePct=targetAmt&&latestTotal>0?Math.min((latestTotal/targetAmt)*100,200):null;
+  const monthlyTargetLine=(()=>{
+    if(!totalInvest||!targetPct||sortedDates.length<2)return[];
+    const s0=new Date(sortedDates[0]);
+    const mr=Math.pow(1+targetPct/100,1/12)-1;
+    return sortedDates.map(d=>{const dt=new Date(d);const m=(dt.getFullYear()-s0.getFullYear())*12+(dt.getMonth()-s0.getMonth());return Math.round(totalInvest*Math.pow(1+mr,m));});
+  })();
+  const chartData=sortedDates.map((d,i)=>({date:d.slice(2),평가액:totals[i]?.v||0,목표달성선:monthlyTargetLine[i]||null}));
+  const allV=[...totals.map(t=>t.v),...(monthlyTargetLine||[]),totalInvest||0].filter(v=>v>0);
+  const yMin=allV.length?Math.floor(Math.min(...allV)*0.95):0;
+  const yMax=allV.length?Math.ceil(Math.max(...allV)*1.05):100;
+  const fY=v=>{const n=Math.round(v);return n>=10000?`${(n/10000).toFixed(1)}억`:n>=1000?`${(n/1000).toFixed(0)}천만`:`${n}만`;};
+  const saveEval=()=>{
+    const entries=evalAccounts.map(acc=>({date:evalDate,acc,amount:parseFloat((evalForm[acc]||"").replace(/,/g,""))||0})).filter(e=>e.amount>0);
+    if(!entries.length)return;
+    setEvalLog(p=>[...p.filter(e=>e.date!==evalDate),...entries]);
+    setEvalForm({});
+  };
+
+  // ── 요약 — SPY ──
+  const spyBuy=parseFloat(spyBuyPrice)||0;
+  const spyCurEntry=evalLog.filter(e=>e.acc==="SPY").sort((a,b)=>b.date.localeCompare(a.date))[0];
+  const spyCur=spyCurEntry?.amount||0;
+  const spyGainPct=spyBuy>0&&spyCur>0?(spyCur/spyBuy-1)*100:null;
+  const spyTargetAmt=totalInvest>0&&spyBuy>0&&spyCur>0?totalInvest*(spyCur/spyBuy):null;
+
+  // ── 요약 — 월별 손익 ──
+  const thisYear=String(new Date().getFullYear());
+  const pnlFiltered=pnlPeriodSel==="올해"?pnlLog.filter(e=>e.month.startsWith(thisYear)):[...pnlLog];
+  const pnlSorted=[...pnlFiltered].sort((a,b)=>a.month.localeCompare(b.month));
+  let cumul=0;
+  const pnlChartData=pnlSorted.map(e=>{cumul+=e.amount;return{month:e.month.slice(2),월손익:e.amount,누적손익:cumul};});
+  const pnlTotal=pnlSorted.reduce((s,e)=>s+e.amount,0);
+  const savePnl2=()=>{
+    if(!pnlForm2.month||!pnlForm2.amount)return;
+    const ym=pnlForm2.month.slice(0,7);
+    setPnlLog(p=>[...p.filter(e=>e.month!==ym),{month:ym,amount:parseFloat(pnlForm2.amount)||0}]);
+    setPnlForm2({month:"",amount:""});setShowPnlInput(false);
+  };
+
+  // ── 탭 버튼 ──
+  const TABS=["입력","거래내역","손익트래킹","요약"];
+  const tabBtn=t=><button key={t} onClick={()=>setTab(t)} style={{flex:1,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,whiteSpace:"nowrap",transition:"all .2s",background:tab===t?`linear-gradient(135deg,${C.purple},${C.purpleL})`:"transparent",color:tab===t?"#fff":C.muted,boxShadow:tab===t?"0 2px 8px rgba(99,102,241,0.4)":"none",minHeight:36}}>{t}</button>;
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'Noto Sans KR','Pretendard',sans-serif"}}>
+
+      {/* 삭제 확인 팝업 */}
+      {dlg&&<div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.75)",backdropFilter:"blur(4px)"}}>
+        <div style={{background:C.bg2,border:`1px solid ${C.border2}`,borderRadius:16,padding:"20px 24px",maxWidth:380,width:"92%"}}>
+          <div style={{fontSize:18,marginBottom:12}}>🗑 삭제 확인</div>
+          <div style={{color:"#94a3b8",fontSize:14,lineHeight:1.7,marginBottom:24}}>{dlg.msg}</div>
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <button onClick={()=>setDlg(null)} style={{padding:"9px 22px",borderRadius:9,border:`1px solid ${C.border2}`,background:"#1e293b",color:"#94a3b8",fontSize:14,fontWeight:700,cursor:"pointer"}}>취소</button>
+            <button onClick={()=>{dlg.fn();setDlg(null);}} style={{padding:"9px 22px",borderRadius:9,border:"none",background:"linear-gradient(135deg,#dc2626,#b91c1c)",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>삭제</button>
+          </div>
+        </div>
+      </div>}
+
+      {/* 헤더 */}
+      <div style={{background:`linear-gradient(135deg,${C.bg2},#1e1b4b)`,borderBottom:`1px solid ${C.border}`,padding:"16px 20px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"nowrap"}}>
+          <div style={{width:36,height:36,borderRadius:9,background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📈</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:16,fontWeight:800,color:"#f1f5f9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>주식 매매 트래커</div>
+            <div style={{fontSize:10,color:C.muted,marginTop:1,whiteSpace:"nowrap"}}>체결문자 파싱 · 손익 분석</div>
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+            <div title={syncStatus==="synced"?"동기화 완료":syncStatus==="syncing"?"동기화 중...":syncStatus==="error"?("동기화 실패: "+syncErrMsg):"동기화 대기 (클라우드에 데이터 없음)"}
+              style={{width:9,height:9,borderRadius:"50%",flexShrink:0,border:"1px solid rgba(255,255,255,0.15)",
+                background:syncStatus==="synced"?C.green:syncStatus==="syncing"?C.yellow:syncStatus==="error"?C.red:"#94a3b8"}}/>
+            <div style={{background:"#1e293b",borderRadius:7,padding:"4px 10px",fontSize:11,color:"#94a3b8",whiteSpace:"nowrap"}}>총 {trades.length}건</div>
+            <button onClick={()=>setShowBackup(true)} title="백업/복원" style={{width:34,height:34,borderRadius:8,border:"none",cursor:"pointer",background:"#1e293b",color:"#94a3b8",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>💾</button>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:2,marginTop:12,background:"rgba(0,0,0,0.2)",borderRadius:10,padding:3}}>{TABS.map(tabBtn)}</div>
+      </div>
+
+      <div style={{maxWidth:1100,margin:"0 auto",padding:"16px 12px"}}>
+
+        {/* ══ 입력 ══ */}
+        {tab==="입력"&&(()=>{
+          const todayFull = today2;
+          const todayTrades = trades
+            .filter(t=>{ const d=t.date||""; return d===todayFull||d===todayFull.slice(2); })
+            .sort((a,b)=>b.id-a.id);
+          const tickerMap = todayTrades.reduce((acc,t)=>{
+            if(!acc[t.ticker]) acc[t.ticker]={ticker:t.ticker,buyQty:0,sellQty:0,cur:t.currency};
+            if(t.tradeType==="매수") acc[t.ticker].buyQty+=t.qty; else acc[t.ticker].sellQty+=t.qty;
+            return acc;
+          },{});
+          const tSummary = Object.values(tickerMap);
+          return (
+          <div style={{width:"100%"}}>
+            {/* 오늘 입력 현황 */}
+            <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:todayTrades.length>0?10:0}}>
+                <span style={{fontSize:12,fontWeight:700,color:"#a5b4fc"}}>
+                  📋 오늘 입력
+                  <span style={{marginLeft:8,background:todayTrades.length>0?C.purple:"#1e293b",color:"#fff",borderRadius:10,padding:"1px 8px",fontSize:11,fontWeight:700}}>{todayTrades.length}건</span>
+                </span>
+                {todayTrades.length>0&&<span style={{fontSize:11,color:C.muted}}>{todayFull.slice(2)}</span>}
+              </div>
+              {todayTrades.length===0
+                ?<div style={{fontSize:12,color:C.dim,padding:"4px 0"}}>아직 오늘 입력된 거래가 없습니다</div>
+                :<>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                    {tSummary.map(s=>(
+                      <div key={s.ticker} style={{background:C.bg3,borderRadius:8,padding:"4px 10px",display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{background:"#1e1b4b",border:`1px solid ${C.purple}44`,padding:"1px 7px",borderRadius:4,fontWeight:800,fontSize:11,color:"#a5b4fc"}}>{s.ticker}</span>
+                        {s.buyQty>0&&<span style={{color:C.green,fontSize:11,fontWeight:700}}>매수 {s.buyQty}주</span>}
+                        {s.sellQty>0&&<span style={{color:C.red,fontSize:11,fontWeight:700}}>매도 {s.sellQty}주</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column"}}>
+                    {todayTrades.map((t,i)=>(
+                      <div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 2px",borderTop:i>0?`1px solid ${C.border}`:"none"}}>
+                        <span style={{fontSize:10,color:C.dim,minWidth:20}}>{i+1}</span>
+                        <span style={{fontWeight:800,fontSize:11,color:"#a5b4fc",minWidth:44}}>{t.ticker}</span>
+                        <span style={{color:t.tradeType==="매수"?C.green:C.red,fontWeight:700,fontSize:11,minWidth:28}}>{t.tradeType}</span>
+                        <span style={{color:C.text,fontSize:11,fontWeight:600}}>{t.qty}주</span>
+                        <span style={{color:C.muted,fontSize:10,marginLeft:"auto"}}>{fmt(t.amount,t.currency)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>}
+            </div>
+
+            {/* 붙여넣기 */}
+            <div style={{fontSize:11,fontWeight:700,color:C.purple,letterSpacing:1.5,textTransform:"uppercase",marginBottom:8}}>체결 문자 붙여넣기</div>
+            <textarea value={sms} onChange={e=>setSms(e.target.value)}
+              onPaste={e=>{const t=e.clipboardData.getData("text");if(t.trim())setTimeout(()=>doParse(t),0);}}
+              placeholder={"[메리츠증권] 해외주식 주문체결 안내\n계좌번호 : 3025**72-01\n종목명 : DIREXION SEMICONDUCTOR DAILY 3X(SOXL)\n매매구분 : 매수\n체결단가 : USD 176.9400\n체결수량 : 6주\n체결금액 : USD 1,061.64\n체결일자 : 05/08"}
+              style={{width:"100%",height:140,background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:14,color:C.text,fontSize:13,lineHeight:1.6,resize:"none",outline:"none",boxSizing:"border-box"}}/>
+            {parseErr&&<div style={{color:C.red,fontSize:12,marginTop:6}}>⚠ {parseErr}</div>}
+
+            {/* 파싱 결과 */}
+            {parsed&&<div style={{background:C.bg2,border:`1px solid ${C.purple}55`,borderRadius:12,padding:"12px 16px",marginTop:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,flexWrap:"wrap"}}>
+                <span style={{background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,padding:"2px 10px",borderRadius:6,fontWeight:800,fontSize:13,color:"#fff"}}>{parsed.ticker}</span>
+                <span style={{color:parsed.tradeType==="매수"?C.green:C.red,fontWeight:700,fontSize:13}}>{parsed.tradeType}</span>
+                <span style={{color:C.text,fontWeight:700,fontSize:13}}>{parsed.qty}주</span>
+                <span style={{color:C.muted,fontSize:12}}>{parsed.date}</span>
+                <span style={{color:C.muted,fontSize:12}}>{fmtBroker(parsed.broker)}</span>
+                <span style={{color:C.muted,fontSize:12,marginLeft:"auto"}}>{fmt(parsed.amount,parsed.currency)}</span>
+              </div>
+              <Btn primary onClick={saveSMS} style={{width:"100%",padding:"10px"}}>✓ 저장하기</Btn>
+            </div>}
+          </div>
+          );
+        })()}
+
+        {/* ══ 거래내역 ══ */}
+        {tab==="거래내역"&&<div>
+          {/* 종목별 현황 */}
+          {tickerSummary.length>0&&<div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:16}}>
+            <div style={{padding:"11px 18px",background:C.bg3,borderBottom:`1px solid ${C.border}`,fontSize:12,fontWeight:700,color:"#a5b4fc"}}>📋 종목별 현황 (전체)</div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:C.bg3,borderBottom:`2px solid ${C.border}`}}>
+                  {["티커","보유수량","평균단가","실현손익"].map(h=><th key={h} style={{padding:"9px 12px",color:C.dim,fontWeight:700,textAlign:"left",whiteSpace:"nowrap",fontSize:11}}>{h}</th>)}
+                </tr></thead>
+                <tbody>{tickerSummary.map((s,i)=>(
+                  <tr key={s.ticker} style={{borderBottom:`1px solid ${C.border}`,background:i%2===0?"transparent":"#ffffff05"}}>
+                    <Td><span style={{background:"#1e1b4b",border:`1px solid ${C.purple}44`,padding:"2px 10px",borderRadius:5,fontWeight:800,fontSize:11,color:"#a5b4fc"}}>{s.ticker}</span></Td>
+                    <Td style={{fontSize:11,textAlign:"right"}}>{s.holdQty}<span style={{color:C.muted,marginLeft:1}}>주</span></Td>
+                    <Td style={{fontSize:11,textAlign:"right"}}>{fmt(s.avgPrice,s.cur)}</Td>
+                    <Td style={{fontWeight:700,textAlign:"right"}}><ColorNum val={s.realizedPnl} cur={s.cur}/></Td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </div>}
+
+          {/* 필터 + 수동추가 */}
+          <div style={{display:"flex",gap:10,marginBottom:12,alignItems:"center"}}>
+            <select value={fAcc} onChange={e=>setFAcc(e.target.value)}
+              style={{background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"8px 12px",color:fAcc==="전체"?C.muted:"#a5b4fc",fontSize:13,fontWeight:fAcc==="전체"?400:700,outline:"none",cursor:"pointer",colorScheme:"dark",minWidth:130}}>
+              {allAccounts.map(a=><option key={a} value={a}>{a}</option>)}
+            </select>
+            <span style={{fontSize:12,color:C.muted}}>{sorted.length}건</span>
+            <button onClick={openNew} style={{marginLeft:"auto",padding:"8px 18px",borderRadius:9,border:"none",cursor:"pointer",fontSize:13,fontWeight:700,background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,color:"#fff",whiteSpace:"nowrap"}}>＋ 수동 추가</button>
+          </div>
+
+          {/* 수동 폼 */}
+          {showForm&&<div style={{background:C.bg2,border:`1px solid ${C.purple}`,borderRadius:14,padding:20,marginBottom:16}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <span style={{fontSize:11,fontWeight:700,color:C.purple,letterSpacing:1,textTransform:"uppercase"}}>{editId!==null?"✏ 수정":"✚ 수동 추가"}</span>
+              <button onClick={()=>{setShowForm(false);setEditId(null);}} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:20}}>✕</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:8,marginBottom:12}}>
+              <ComboBox label="증권사" value={form.broker} onChange={v=>setF("broker",v)} options={brokerOpts} placeholder="메리츠증권"/>
+              <ComboBox label="계좌번호" value={form.account} onChange={v=>setF("account",v)} options={accountOpts} placeholder="3025**72-01"/>
+              <DatePicker label="날짜" value={form.date} onChange={v=>setF("date",v)}/>
+              <ComboBox label="종목 티커 *" value={form.ticker} onChange={v=>setF("ticker",v.toUpperCase())} options={tickerOpts} placeholder="SOXL" required/>
+              <div><div style={{fontSize:12,color:C.muted,marginBottom:5}}>매매구분 *</div>
+                <div style={{display:"flex",gap:6}}>{["매수","매도"].map(tp=><button key={tp} onClick={()=>setF("tradeType",tp)}
+                  style={{flex:1,padding:"9px",borderRadius:8,border:`1px solid ${form.tradeType===tp?(tp==="매수"?"#166534":"#7f1d1d"):C.border2}`,cursor:"pointer",fontSize:13,fontWeight:700,
+                    background:form.tradeType===tp?(tp==="매수"?"#052e16":"#2d0a0a"):"#111827",color:form.tradeType===tp?(tp==="매수"?C.green:C.red):C.muted}}>{tp}</button>)}</div>
+              </div>
+              <div><div style={{fontSize:12,color:C.muted,marginBottom:5}}>통화</div>
+                <div style={{display:"flex",gap:6}}>{["USD","KRW"].map(c=><button key={c} onClick={()=>setF("currency",c)}
+                  style={{flex:1,padding:"9px",borderRadius:8,border:`1px solid ${form.currency===c?C.purple:C.border2}`,cursor:"pointer",fontSize:13,fontWeight:700,
+                    background:form.currency===c?"#1e1b4b":"#111827",color:form.currency===c?"#a5b4fc":C.muted}}>{c}</button>)}</div>
+              </div>
+              <Field label="체결수량 *" type="number" value={form.qty} onChange={v=>setF("qty",v)} placeholder="6"/>
+              <Field label="체결단가" type="number" value={form.price} onChange={v=>setF("price",v)} placeholder="176.94"/>
+              <Field label="체결금액" type="number" value={form.amount} onChange={v=>setF("amount",v)} placeholder="자동계산"/>
+            </div>
+            {formErr&&<div style={{color:C.red,fontSize:13,marginBottom:10}}>⚠ {formErr}</div>}
+            <div style={{display:"flex",gap:10}}>
+              <Btn primary onClick={saveForm}>{editId!==null?"✓ 수정":"✓ 추가"}</Btn>
+              <Btn onClick={()=>{setShowForm(false);setEditId(null);}}>취소</Btn>
+            </div>
+          </div>}
+
+          {/* 거래 테이블 */}
+          {sorted.length===0?<Empty text="저장된 거래가 없습니다"/>:
+            <div style={{overflowX:"auto",borderRadius:12,border:`1px solid ${C.border}`}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:C.bg3,borderBottom:`2px solid ${C.border}`}}>
+                  {[["date","일자"],["broker","증권사"],["account","계좌"],["ticker","티커"],["tradeType","구분"],["qty","수량"],["price","단가"],["amount","금액"]].map(([k,l])=>(
+                    <Th key={k} onClick={()=>togSort(k)} active={sortCol===k} dir={sortDir}>{l}</Th>
+                  ))}
+                  <th style={{padding:"10px 8px",color:C.dim,fontWeight:700,textAlign:"center",whiteSpace:"nowrap",fontSize:11}}>-</th>
+                </tr></thead>
+                <tbody>{sorted.map((t,i)=>(
+                  <tr key={t.id} style={{borderBottom:`1px solid ${C.border}`,background:editId===t.id?"#1e1b4b33":i%2===0?"transparent":"#ffffff05"}}
+                    onMouseEnter={e=>e.currentTarget.style.background="#1e293b55"}
+                    onMouseLeave={e=>e.currentTarget.style.background=editId===t.id?"#1e1b4b33":i%2===0?"transparent":"#ffffff05"}>
+                    <Td style={{color:C.muted,fontSize:11}}>{t.date?.slice(2)}</Td>
+                    <Td style={{color:C.muted,fontSize:11}}>{fmtBroker(t.broker)}</Td>
+                    <Td style={{color:C.muted,fontSize:11}}>{t.account}</Td>
+                    <Td><span style={{background:"#1e1b4b",border:`1px solid ${C.purple}44`,padding:"2px 8px",borderRadius:5,fontWeight:800,color:"#a5b4fc",fontSize:11}}>{t.ticker}</span></Td>
+                    <Td><span style={{background:t.tradeType==="매수"?"#052e16":"#2d0a0a",color:t.tradeType==="매수"?C.green:C.red,fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:5}}>{t.tradeType}</span></Td>
+                    <Td style={{fontSize:11,textAlign:"right"}}>{t.qty}<span style={{color:C.muted,marginLeft:1}}>주</span></Td>
+                    <Td style={{fontSize:11,textAlign:"right"}}>{fmt(t.price,t.currency)}</Td>
+                    <Td style={{fontWeight:700,fontSize:12,textAlign:"right"}}>{fmt(t.amount,t.currency)}</Td>
+                    <td style={{textAlign:"center",padding:"8px 6px",whiteSpace:"nowrap"}}>
+                      <button onClick={()=>startEdit(t)} style={{background:"none",border:"none",cursor:"pointer",color:C.purple,fontSize:13,marginRight:4}}>✏</button>
+                      <button onClick={()=>delTrade(t.id)} style={{background:"none",border:"none",cursor:"pointer",color:C.dim,fontSize:13}}>🗑</button>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>}
+        </div>}
+
+        {/* ══ 손익트래킹 ══ */}
+        {tab==="손익트래킹"&&<div>
+          {/* 필터 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 16px",marginBottom:16,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",flex:1}}>
+              {["이번달","올해","작년","현재까지"].map(p=><Pill key={p} active={rptPeriod===p} onClick={()=>setRptPeriod(p)}>{p}</Pill>)}
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+              <span style={{fontSize:11,color:C.muted,fontWeight:700,whiteSpace:"nowrap"}}>계좌</span>
+              <select value={rptAcc} onChange={e=>setRptAcc(e.target.value)}
+                style={{background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"6px 10px",color:rptAcc==="전체"?C.muted:"#a5b4fc",fontSize:12,fontWeight:rptAcc==="전체"?400:700,outline:"none",cursor:"pointer",colorScheme:"dark"}}>
+                {["전체",...new Set(trades.map(t=>t.account))].map(a=><option key={a} value={a}>{a}</option>)}
+              </select>
+              <span style={{fontSize:11,color:C.muted,fontWeight:700,whiteSpace:"nowrap"}}>종목</span>
+              <select value={rptTicker} onChange={e=>setRptTicker(e.target.value)}
+                style={{background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:8,padding:"6px 10px",color:rptTicker==="전체"?C.muted:"#a5b4fc",fontSize:12,fontWeight:rptTicker==="전체"?400:700,outline:"none",cursor:"pointer",colorScheme:"dark"}}>
+                {["전체",...new Set(trades.map(t=>t.ticker))].map(tk=><option key={tk} value={tk}>{tk}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {rptTrades.length===0?<Empty text="해당 조건에 거래 내역이 없습니다"/>:<>
+          {/* KPI */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:10,marginBottom:16}}>
+            {[{label:"실현 손익",val:grandReal},{label:"거래 건수",val:null,raw:rptTrades.length+"건"}].map(({label,val,raw})=>(
+              <div key={label} style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 18px"}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>{label}</div>
+                <div style={{fontSize:20,fontWeight:800}}>{val!==null&&val!==undefined?<ColorNum val={val} cur={grandCur}/>:<span style={{color:"#f1f5f9"}}>{raw}</span>}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 그래프 */}
+          <div style={{marginBottom:14}}>
+            <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#a5b4fc",marginBottom:14}}>📊 종목별 손익</div>
+              {tickerStats.sort((a,b)=>b.realizedPnl-a.realizedPnl).map(s=>(
+                <div key={s.ticker} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                    <span style={{fontSize:12,fontWeight:700,color:C.text}}>{s.ticker}</span>
+                    <ColorNum val={s.realizedPnl} cur={s.cur}/>
+                  </div>
+                  <div style={{height:8,background:"#1e293b",borderRadius:4,overflow:"hidden"}}>
+                    <div style={{width:`${Math.abs(s.realizedPnl)/maxT*100}%`,height:"100%",borderRadius:4,background:s.realizedPnl>=0?"linear-gradient(90deg,#4ade80,#22c55e)":"linear-gradient(90deg,#f87171,#ef4444)"}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#a5b4fc",marginBottom:14}}>🏦 계좌별 손익</div>
+              {accStats.sort((a,b)=>b.realized-a.realized).map(s=>(
+                <div key={s.acc} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                    <span style={{fontSize:12,color:"#94a3b8"}}>{s.acc}</span>
+                    <ColorNum val={s.realized} cur={s.cur}/>
+                  </div>
+                  <div style={{height:10,background:"#1e293b",borderRadius:5,overflow:"hidden"}}>
+                    <div style={{width:`${Math.abs(s.realized)/maxA*100}%`,height:"100%",borderRadius:5,background:s.realized>=0?"linear-gradient(90deg,#6366f1,#8b5cf6)":"linear-gradient(90deg,#f87171,#ef4444)"}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 파이차트 + 드릴다운 */}
+          {tickerStats.length>0&&(()=>{
+            const gains=tickerStats.filter(s=>s.realizedPnl>0);
+            const losses=tickerStats.filter(s=>s.realizedPnl<0);
+            const drillMonths=drillTicker?monthlyPnl(drillTicker):[];
+            const maxDrill=drillMonths.length?Math.max(...drillMonths.map(([,v])=>Math.abs(v)),1):1;
+            return (<>
+              <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+                <PieChart items={gains} title="📈 수익 종목" colorOffset={0} drillTicker={drillTicker} setDrillTicker={setDrillTicker}/>
+                <PieChart items={losses} title="📉 손실 종목" colorOffset={3} drillTicker={drillTicker} setDrillTicker={setDrillTicker}/>
+              </div>
+              {drillTicker&&drillMonths.length>0&&<div style={{background:C.bg2,border:`1px solid ${C.purple}`,borderRadius:14,padding:20,marginTop:14}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,padding:"3px 12px",borderRadius:8,fontWeight:800,fontSize:14,color:"#fff"}}>{drillTicker}</span>
+                    <span style={{fontSize:13,color:C.muted}}>월별 실현손익</span>
+                  </div>
+                  <button onClick={()=>setDrillTicker(null)} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:18}}>✕</button>
+                </div>
+                {drillMonths.map(([ym,pnl])=>(
+                  <div key={ym} style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+                    <span style={{fontSize:12,color:C.muted,minWidth:56,fontWeight:600}}>{ym.slice(2)}</span>
+                    <div style={{flex:1,height:24,background:"#1e293b",borderRadius:6,overflow:"hidden",position:"relative"}}>
+                      <div style={{position:"absolute",top:0,bottom:0,left:0,width:`${Math.abs(pnl)/maxDrill*100}%`,background:pnl>=0?"linear-gradient(90deg,#4ade80,#22c55e)":"linear-gradient(90deg,#f87171,#ef4444)",borderRadius:6}}/>
+                      <span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:11,fontWeight:700,color:pnl>=0?C.green:C.red}}>{pnl>=0?"+":""}{fmt(pnl,tickerStats.find(s=>s.ticker===drillTicker)?.cur||"USD")}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>}
+            </>);
+          })()}
+          </>}
+        </div>}
+
+        {/* ══ 요약 ══ */}
+        {tab==="요약"&&<div>
+          {/* 평가액 입력 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden",marginBottom:14}}>
+            <div style={{background:C.bg3,borderBottom:`1px solid ${C.border}`,padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <span style={{fontSize:12,fontWeight:700,color:"#a5b4fc"}}>📝 평가액 입력 <span style={{fontSize:10,color:C.muted,fontWeight:400}}>(만원)</span></span>
+              <button onClick={()=>setShowAddAcc(v=>!v)} style={{padding:"3px 10px",borderRadius:6,border:`1px solid ${C.border2}`,cursor:"pointer",fontSize:11,background:"transparent",color:C.muted}}>＋ 계좌추가</button>
+            </div>
+            {showAddAcc&&<div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:8,alignItems:"center",background:"#1e1b4b22"}}>
+              <input autoFocus value={newAccName} onChange={e=>setNewAccName(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter"&&newAccName.trim()){setEvalAccounts(p=>[...p,newAccName.trim()]);setNewAccName("");setShowAddAcc(false);}}}
+                placeholder="계좌명 입력"
+                style={{flex:1,background:"#1e293b",border:`1px solid ${C.purple}`,borderRadius:6,padding:"5px 10px",color:C.text,fontSize:12,outline:"none"}}/>
+              <button onClick={()=>{if(newAccName.trim()){setEvalAccounts(p=>[...p,newAccName.trim()]);setNewAccName("");setShowAddAcc(false);}}} style={{padding:"5px 12px",borderRadius:6,border:"none",cursor:"pointer",background:C.purple,color:"#fff",fontSize:12,fontWeight:700}}>추가</button>
+              <button onClick={()=>{setShowAddAcc(false);setNewAccName("");}} style={{padding:"5px 10px",borderRadius:6,border:"none",cursor:"pointer",background:"#1e293b",color:C.muted,fontSize:12}}>취소</button>
+            </div>}
+            <div style={{padding:"12px 16px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <span style={{fontSize:11,color:C.muted,minWidth:32}}>날짜</span>
+                <input type="date" value={evalDate} onChange={e=>setEvalDate(e.target.value)}
+                  style={{background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:7,padding:"5px 10px",color:C.text,fontSize:12,outline:"none",colorScheme:"dark",flex:1}}/>
+                <button onClick={saveEval} style={{padding:"6px 18px",borderRadius:8,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,color:"#fff",whiteSpace:"nowrap"}}>✓ 저장</button>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {evalAccounts.map((acc,i)=>{
+                  const prev=latest&&latest!==evalDate?evalLog.find(e=>e.date===latest&&e.acc===acc):null;
+                  return <div key={acc} style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{display:"flex",alignItems:"center",gap:4,minWidth:80}}>
+                      <div style={{width:8,height:8,borderRadius:2,background:CHART_COLORS[i%CHART_COLORS.length],flexShrink:0}}/>
+                      <span style={{fontSize:12,fontWeight:600,color:C.text,whiteSpace:"nowrap"}}>{acc}</span>
+                    </div>
+                    <input type="text" value={evalForm[acc]||""} onChange={e=>setEvalForm(f=>({...f,[acc]:e.target.value}))}
+                      placeholder={prev?fmtMan(prev.amount):"금액 입력"}
+                      style={{flex:1,background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:6,padding:"5px 10px",color:C.text,fontSize:12,outline:"none"}}/>
+                    <span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>만원</span>
+                    {prev&&<span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap",minWidth:60}}>직전 {fmtMan(prev.amount)}</span>}
+                    <button onClick={()=>setEvalAccounts(p=>p.filter(a=>a!==acc))} style={{background:"none",border:"none",cursor:"pointer",color:C.dim,fontSize:11,padding:0,flexShrink:0}}>✕</button>
+                  </div>;
+                })}
+              </div>
+            </div>
+          </div>
+
+          {dates.length>0&&<>
+          {/* KPI */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))",gap:10,marginBottom:14}}>
+            {[
+              {label:"최근 총 평가액",val:null,raw:fmtMan(latestTotal),color:"#f1f5f9"},
+              {label:"초기 투입",val:null,raw:totalInvest>0?fmtMan(totalInvest):"미설정",color:C.muted},
+              {label:"수익금",val:gainAmt,color:gainAmt!=null?(gainAmt>=0?C.green:C.red):C.muted},
+              {label:"수익률",val:null,raw:gainPct!=null?`${gainPct>=0?"+":""}${gainPct.toFixed(2)}%`:"—",color:gainPct!=null?(gainPct>=0?C.green:C.red):C.muted},
+              {label:"목표 수익률",val:null,raw:targetPct?`${targetPct}%/년`:"미설정",color:C.yellow},
+              {label:"기록 횟수",val:null,raw:`${dates.length}회`,color:C.muted},
+            ].map(({label,val,raw,color})=>(
+              <div key={label} style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px"}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:5}}>{label}</div>
+                <div style={{fontSize:15,fontWeight:800,color}}>{val!==null&&val!==undefined?<>{val>=0?"+":""}{fmtMan(val)}</>:raw}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 목표 + SPY */}
+          <div style={{marginBottom:14}}>
+            {/* 목표 달성 현황 */}
+            <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+              <div style={{fontSize:12,fontWeight:700,color:"#a5b4fc",marginBottom:14}}>🎯 목표 수익률 달성 현황</div>
+              <div style={{background:"#0f172a",borderRadius:10,padding:"12px 14px",marginBottom:12}}>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:10}}>설정</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  <div style={{background:"#1e293b",borderRadius:8,padding:"10px 12px"}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:6}}>총 투입금액</div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <input type="text" value={totalInvestInput} onChange={e=>setTotalInvestInput(e.target.value.replace(/[^\d]/g,""))}
+                        placeholder="5000"
+                        style={{flex:1,background:"transparent",border:"none",color:C.text,fontSize:16,fontWeight:700,outline:"none",width:"100%"}}/>
+                      <span style={{fontSize:11,color:C.yellow,fontWeight:700,flexShrink:0}}>만원</span>
+                    </div>
+                  </div>
+                  <div style={{background:"#1e293b",borderRadius:8,padding:"10px 12px"}}>
+                    <div style={{fontSize:10,color:C.muted,marginBottom:6}}>연 목표수익률</div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <input type="number" value={targetRate} onChange={e=>setTargetRate(e.target.value)}
+                        style={{flex:1,background:"transparent",border:"none",color:C.text,fontSize:16,fontWeight:700,outline:"none",width:"100%",textAlign:"left"}}/>
+                      <span style={{fontSize:11,color:C.yellow,fontWeight:700,flexShrink:0}}>%/년</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {totalInvest>0&&targetAmt&&<>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted,marginBottom:4}}>
+                  <span>현재 {fmtMan(latestTotal)}</span><span>1년목표 {fmtMan(Math.round(targetAmt))}</span>
+                </div>
+                <div style={{height:14,background:"#1e293b",borderRadius:7,overflow:"hidden",position:"relative",marginBottom:6}}>
+                  <div style={{width:`${Math.min(achievePct||0,100)}%`,height:"100%",borderRadius:7,background:(achievePct||0)>=100?"linear-gradient(90deg,#4ade80,#22c55e)":"linear-gradient(90deg,#6366f1,#8b5cf6)",transition:"width .5s"}}/>
+                  {(achievePct||0)>=100&&<div style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:10,fontWeight:700,color:"#fff"}}>✓ 달성!</div>}
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted}}>
+                  <span>투입 {fmtMan(totalInvest)}</span>
+                  <span>달성률 <span style={{color:(achievePct||0)>=100?C.green:"#a5b4fc",fontWeight:700}}>{(achievePct||0).toFixed(1)}%</span></span>
+                </div>
+                {gainAmt!=null&&<div style={{marginTop:8,padding:"6px 10px",background:"#0f172a",borderRadius:7,display:"flex",justifyContent:"space-between",fontSize:11}}>
+                  <span style={{color:C.muted}}>수익금</span>
+                  <span style={{fontWeight:700,color:gainAmt>=0?C.green:C.red}}>{gainAmt>=0?"+":""}{fmtMan(gainAmt)}</span>
+                  <span style={{color:(gainPct||0)>=0?C.green:C.red,fontWeight:700}}>({(gainPct||0)>=0?"+":""}{(gainPct||0).toFixed(2)}%)</span>
+                </div>}
+                {monthlyTargetLine.length>1&&<div style={{marginTop:8,padding:"6px 10px",background:"#0f172a",borderRadius:7,fontSize:11}}>
+                  <div style={{color:C.yellow,fontWeight:600,marginBottom:2}}>📅 이번달 목표</div>
+                  <div style={{color:"#f1f5f9",fontWeight:700}}>{fmtMan(monthlyTargetLine[monthlyTargetLine.length-1])}</div>
+                  <div style={{color:C.muted,marginTop:1}}>월복리 {(Math.pow(1+parseFloat(targetRate)/100,1/12)-1).toFixed(3)}%</div>
+                </div>}
+              </>}
+            </div>
+
+
+          </div>
+
+          {/* 전체 평가액 추이 그래프 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:"18px 18px 10px",marginBottom:14}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#a5b4fc",marginBottom:14}}>📈 전체 평가액 추이</div>
+            {sortedDates.length<2
+              ?<div style={{textAlign:"center",color:C.muted,padding:"36px 0",fontSize:13}}>2회 이상 기록하면 그래프가 표시됩니다</div>
+              :(()=>{
+                const W=560,H=220,PL=58,PR=24,PT=16,PB=36;
+                const cW=W-PL-PR, cH=H-PT-PB;
+                const n=chartData.length;
+                const allV=[...chartData.map(d=>d['평가액']),...(monthlyTargetLine.length>1?monthlyTargetLine:[]),totalInvest||0].filter(v=>v>0);
+                const vMin=allV.length?Math.floor(Math.min(...allV)*0.95):0;
+                const vMax=allV.length?Math.ceil(Math.max(...allV)*1.05):100;
+                const vR=vMax-vMin||1;
+                const xP=i=>PL+(n<=1?cW/2:i/(n-1)*cW);
+                const yP=v=>PT+cH-((v-vMin)/vR)*cH;
+                const ticks=5;
+                // 평가액 path
+                const evalPts=chartData.map((d,i)=>`${xP(i)},${yP(d['평가액'])}`).join(' ');
+                const evalArea=[...chartData.map((d,i)=>`${xP(i)},${yP(d['평가액'])}`),`${xP(n-1)},${PT+cH}`,`${xP(0)},${PT+cH}`].join(' ');
+                // 목표 path
+                const tgtPts=monthlyTargetLine.length>1?monthlyTargetLine.map((v,i)=>`${xP(i)},${yP(v)}`).join(' '):'';
+                return (
+                  <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{overflow:'visible',display:'block'}}>
+                    <defs>
+                      <linearGradient id="eg" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4}/>
+                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0.02}/>
+                      </linearGradient>
+                    </defs>
+                    {/* 그리드 */}
+                    {Array.from({length:ticks},(_,i)=>{
+                      const v=vMin+vR*i/(ticks-1);
+                      const y=yP(v);
+                      return <g key={i}>
+                        <line x1={PL} x2={W-PR} y1={y} y2={y} stroke="#1e293b" strokeWidth={1}/>
+                        <text x={PL-4} y={y+4} textAnchor="end" style={{fontSize:'9px',fill:'#64748b'}}>{fY(Math.round(v))}</text>
+                      </g>;
+                    })}
+                    {/* 투입선 */}
+                    {totalInvest>0&&totalInvest>=vMin&&totalInvest<=vMax&&<>
+                      <line x1={PL} x2={W-PR} y1={yP(totalInvest)} y2={yP(totalInvest)} stroke="#334155" strokeDasharray="4 4" strokeWidth={1}/>
+                      <text x={W-PR+2} y={yP(totalInvest)+4} style={{fontSize:'8px',fill:'#64748b'}}>투입</text>
+                    </>}
+                    {/* 목표선 */}
+                    {tgtPts&&<polyline points={tgtPts} fill="none" stroke="#fbbf24" strokeWidth={2} strokeDasharray="7 4"/>}
+                    {/* 평가액 면적 */}
+                    <polygon points={evalArea} fill="url(#eg)"/>
+                    {/* 평가액 선 */}
+                    <polyline points={evalPts} fill="none" stroke="#6366f1" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round"/>
+                    {/* 점 + 날짜 */}
+                    {chartData.map((d,i)=>{
+                      const x=xP(i),y=yP(d['평가액']),last=i===n-1;
+                      return <g key={i}>
+                        <circle cx={x} cy={y} r={last?5:3.5} fill={last?'#6366f1':'#0f172a'} stroke="#6366f1" strokeWidth={2}/>
+                        {(last||i===0||n<=6)&&<text x={x} y={y-8} textAnchor="middle" style={{fontSize:'9px',fill:last?'#a5b4fc':'#64748b',fontWeight:last?'bold':'normal'}}>{fY(d['평가액'])}</text>}
+                        {(n<=10||(i%(Math.ceil(n/8))===0)||last)&&<text x={x} y={H-4} textAnchor="middle" style={{fontSize:'9px',fill:'#64748b'}}>{d.date}</text>}
+                      </g>;
+                    })}
+                    {/* 범례 */}
+                    <g transform={`translate(${PL},${H-2})`}>
+                      <rect x={0} y={-6} width={10} height={4} rx={1} fill="#6366f1"/>
+                      <text x={13} y={0} style={{fontSize:'9px',fill:'#a5b4fc'}}>평가액</text>
+                      {tgtPts&&<><line x1={60} x2={74} y1={-4} y2={-4} stroke="#fbbf24" strokeWidth={2} strokeDasharray="5 3"/>
+                      <text x={77} y={0} style={{fontSize:'9px',fill:'#fbbf24'}}>목표달성선</text></>}
+                    </g>
+                  </svg>
+                );
+              })()}
+          </div>
+
+          {/* 계좌별 최근 평가액 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:18,marginBottom:14}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#a5b4fc",marginBottom:14}}>🏦 계좌별 최근 평가액</div>
+            {evalAccounts.map((acc,i)=>{
+              const last2=dates.slice(0,2);
+              const cur2=evalLog.find(e=>e.date===last2[0]&&e.acc===acc)?.amount||0;
+              const prev2=last2[1]?evalLog.find(e=>e.date===last2[1]&&e.acc===acc)?.amount||0:null;
+              const diff2=prev2!=null?cur2-prev2:null;
+              const max2=Math.max(...evalAccounts.map(a=>evalLog.find(e=>e.date===last2[0]&&e.acc===a)?.amount||0),1);
+              return <div key={acc} style={{marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4,alignItems:"center"}}>
+                  <span style={{fontSize:12,fontWeight:700,color:CHART_COLORS[i%CHART_COLORS.length]}}>{acc}</span>
+                  <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                    {diff2!=null&&<span style={{fontSize:11,color:diff2>=0?C.green:C.red,fontWeight:700}}>{diff2>=0?"+":""}{fmtMan(diff2)}</span>}
+                    <span style={{fontSize:13,fontWeight:700,color:C.text}}>{fmtMan(cur2)}</span>
+                  </div>
+                </div>
+                <div style={{height:12,background:"#1e293b",borderRadius:6,overflow:"hidden"}}>
+                  <div style={{width:`${cur2/max2*100}%`,height:"100%",borderRadius:6,background:`linear-gradient(90deg,${CHART_COLORS[i%CHART_COLORS.length]},${CHART_COLORS[(i+1)%CHART_COLORS.length]})`}}/>
+                </div>
+              </div>;
+            })}
+          </div>
+
+          {/* 히스토리 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:14}}>
+            <div style={{padding:"11px 18px",background:C.bg3,borderBottom:`1px solid ${C.border}`,fontSize:12,fontWeight:700,color:"#a5b4fc"}}>📋 기록 히스토리</div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:C.bg3,borderBottom:`2px solid ${C.border}`}}>
+                  <th style={{padding:"9px 12px",color:C.dim,fontWeight:700,textAlign:"left",fontSize:11,whiteSpace:"nowrap"}}>날짜</th>
+                  <th style={{padding:"9px 12px",color:"#a5b4fc",fontWeight:700,textAlign:"right",fontSize:11,whiteSpace:"nowrap"}}>합계</th>
+                  {evalAccounts.map(acc=><th key={acc} style={{padding:"9px 12px",color:C.dim,fontWeight:700,textAlign:"right",fontSize:11,whiteSpace:"nowrap"}}>{acc}</th>)}
+                  <th style={{padding:"9px 12px",width:32}}></th>
+                </tr></thead>
+                <tbody>{dates.map((d,i)=>{
+                  const total=evalAccounts.reduce((s,acc)=>s+(evalLog.find(e=>e.date===d&&e.acc===acc)?.amount||0),0);
+                  const prevTotal=dates[i+1]?evalAccounts.reduce((s,acc)=>s+(evalLog.find(e=>e.date===dates[i+1]&&e.acc===acc)?.amount||0),0):null;
+                  const diff=prevTotal!=null?total-prevTotal:null;
+                  return <tr key={d} style={{borderBottom:`1px solid ${C.border}`,background:i%2===0?"transparent":"#ffffff05"}}>
+                    <Td style={{fontWeight:600,fontSize:12,whiteSpace:"nowrap"}}>{d.slice(2)}</Td>
+                    <Td style={{textAlign:"right",fontWeight:700,whiteSpace:"nowrap",minWidth:90}}>
+                      <div style={{color:"#f1f5f9",fontSize:13,fontWeight:800}}>{fmtMan(total)}</div>
+                      {diff!=null&&<div style={{fontSize:10,color:diff>=0?C.green:C.red,fontWeight:700,marginTop:1}}>{diff>=0?"▲":"▼"} {fmtMan(Math.abs(diff))}</div>}
+                    </Td>
+                    {evalAccounts.map(acc=>{const v=evalLog.find(e=>e.date===d&&e.acc===acc)?.amount||0;return <Td key={acc} style={{textAlign:"right",fontSize:12,color:v?C.text:C.dim}}>{v?fmtMan(v):"-"}</Td>;})}
+                    <td style={{padding:"8px",textAlign:"center"}}>
+                      <button onClick={()=>setEvalLog(p=>p.filter(e=>e.date!==d))} style={{background:"none",border:"none",cursor:"pointer",color:C.dim,fontSize:12}}>🗑</button>
+                    </td>
+                  </tr>;
+                })}</tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* 월별 실현손익 */}
+          <div style={{background:C.bg2,border:`1px solid ${C.border}`,borderRadius:14,padding:18}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
+              <span style={{fontSize:12,fontWeight:700,color:"#a5b4fc"}}>💰 월별 실현손익</span>
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                {["전체","올해"].map(p=><button key={p} onClick={()=>setPnlPeriodSel(p)}
+                  style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${pnlPeriodSel===p?C.purple:C.border}`,cursor:"pointer",fontSize:11,fontWeight:600,
+                    background:pnlPeriodSel===p?"#1e1b4b":"transparent",color:pnlPeriodSel===p?"#a5b4fc":C.muted}}>{p}</button>)}
+                <button onClick={()=>setShowPnlInput(v=>!v)}
+                  style={{padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,cursor:"pointer",fontSize:11,fontWeight:600,background:"transparent",color:C.muted}}>
+                  {showPnlInput?"닫기":"＋ 입력"}</button>
+              </div>
+            </div>
+            {showPnlInput&&<div style={{background:C.bg3,borderRadius:10,padding:"10px 14px",marginBottom:12,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+              <input type="month" value={pnlForm2.month} onChange={e=>setPnlForm2(f=>({...f,month:e.target.value}))}
+                style={{background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:7,padding:"6px 10px",color:C.text,fontSize:12,outline:"none",colorScheme:"dark"}}/>
+              <input type="number" value={pnlForm2.amount} onChange={e=>setPnlForm2(f=>({...f,amount:e.target.value}))}
+                placeholder="실현손익 (손실은 음수, 달러)"
+                style={{flex:1,minWidth:140,background:"#1e293b",border:`1px solid ${C.border2}`,borderRadius:7,padding:"6px 10px",color:C.text,fontSize:12,outline:"none"}}/>
+              <span style={{fontSize:11,color:C.yellow,fontWeight:700,whiteSpace:"nowrap"}}>USD $</span>
+              <button onClick={savePnl2} style={{padding:"6px 16px",borderRadius:7,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,color:"#fff"}}>저장</button>
+            </div>}
+            {pnlSorted.length===0
+              ?<div style={{textAlign:"center",color:C.muted,padding:"28px 0",fontSize:13}}>월별 실현손익을 입력하면 그래프가 표시됩니다</div>
+              :<>
+              {/* KPI */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:8,marginBottom:12}}>
+                {[
+                  {label:"누적 실현손익",val:pnlTotal,color:pnlTotal>=0?C.green:C.red},
+                  {label:"월 평균",val:Math.round(pnlTotal/pnlSorted.length),color:pnlTotal>=0?C.green:C.red},
+                  {label:"기록 개월",raw:`${pnlSorted.length}개월`},
+                  {label:"최고 수익월",raw:pnlSorted.length?[...pnlSorted].sort((a,b)=>b.amount-a.amount)[0].month.slice(2):"-"},
+                ].map(({label,val,raw,color})=>(
+                  <div key={label} style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px"}}>
+                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>{label}</div>
+                    <div style={{fontSize:13,fontWeight:800,color:color||"#f1f5f9"}}>
+                      {val!==undefined?`${val>=0?"+":""}$${Math.abs(val).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}`:raw}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {/* 복합 그래프 */}
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.muted,marginBottom:8,display:"flex",gap:14}}>
+                  <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{display:"inline-block",width:10,height:10,borderRadius:2,background:C.green}}/>월 손익</span>
+                  <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{display:"inline-block",width:16,height:2,background:"#06b6d4",borderRadius:1}}/>누적손익</span>
+                </div>
+                {(()=>{
+                  const W2=560,H2=200,PL2=56,PR2=16,PT2=12,PB2=28;
+                  const cW2=W2-PL2-PR2, cH2=H2-PT2-PB2;
+                  const n2=pnlChartData.length;
+                  if(!n2) return null;
+                  const allV2=[...pnlChartData.map(d=>d['월손익']),...pnlChartData.map(d=>d['누적손익'])];
+                  const vMin2=Math.min(...allV2,0)*1.1;
+                  const vMax2=Math.max(...allV2,0)*1.1||1;
+                  const vR2=vMax2-vMin2||1;
+                  const xP2=i=>PL2+(n2<=1?cW2/2:i/(n2-1)*cW2);
+                  const yP2=v=>PT2+cH2-((v-vMin2)/vR2)*cH2;
+                  const y0=yP2(0);
+                  const bW=Math.max(6,cW2/n2*0.5);
+                  return (
+                    <svg width="100%" viewBox={`0 0 ${W2} ${H2}`} style={{overflow:'visible',display:'block'}}>
+                      {/* 그리드 */}
+                      {[-2,-1,0,1,2].map(t=>{
+                        const v=vMin2+vR2*(t+2)/4;
+                        const y=yP2(v);
+                        return <g key={t}>
+                          <line x1={PL2} x2={W2-PR2} y1={y} y2={y} stroke="#1e293b" strokeWidth={1}/>
+                          <text x={PL2-4} y={y+4} textAnchor="end" style={{fontSize:'8px',fill:'#64748b'}}>{v>=0?'+$':'-$'}{Math.abs(Math.round(v))}</text>
+                        </g>;
+                      })}
+                      {/* 0선 */}
+                      <line x1={PL2} x2={W2-PR2} y1={y0} y2={y0} stroke="#334155" strokeWidth={1.5}/>
+                      {/* 막대 */}
+                      {pnlChartData.map((d,i)=>{
+                        const x=xP2(i);
+                        const v=d['월손익'];
+                        const barY=v>=0?yP2(v):y0;
+                        const barH=Math.abs(yP2(v)-y0);
+                        return <rect key={i} x={x-bW/2} y={barY} width={bW} height={Math.max(barH,1)}
+                          rx={2} fill={v>=0?'#4ade80':'#f87171'} opacity={0.85}/>;
+                      })}
+                      {/* 누적선 */}
+                      {n2>1&&<polyline
+                        points={pnlChartData.map((d,i)=>`${xP2(i)},${yP2(d['누적손익'])}`).join(' ')}
+                        fill="none" stroke="#06b6d4" strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round"/>}
+                      {pnlChartData.map((d,i)=>(
+                        <circle key={i} cx={xP2(i)} cy={yP2(d['누적손익'])} r={3} fill="#06b6d4" stroke="#0f172a" strokeWidth={1.5}/>
+                      ))}
+                      {/* X축 라벨 */}
+                      {pnlChartData.map((d,i)=>(
+                        (n2<=12||(i%(Math.ceil(n2/8))===0)||i===n2-1)&&
+                        <text key={i} x={xP2(i)} y={H2-2} textAnchor="middle" style={{fontSize:'9px',fill:'#64748b'}}>{d.month}</text>
+                      ))}
+                    </svg>
+                  );
+                })()}
+              </div>
+              {/* 리스트 */}
+              <div style={{display:"flex",flexDirection:"column"}}>
+                {[...pnlSorted].reverse().map((e,i)=>{
+                  const maxAbs2=Math.max(...pnlSorted.map(x=>Math.abs(x.amount)),1);
+                  return <div key={e.month} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 4px",borderBottom:i<pnlSorted.length-1?`1px solid ${C.border}`:"none"}}>
+                    <span style={{fontSize:12,color:C.muted,minWidth:48,fontWeight:600}}>{e.month.slice(2)}</span>
+                    <div style={{flex:1,height:8,background:"#1e293b",borderRadius:4,overflow:"hidden"}}>
+                      <div style={{width:`${Math.abs(e.amount)/maxAbs2*100}%`,height:"100%",borderRadius:4,background:e.amount>=0?"linear-gradient(90deg,#4ade80,#22c55e)":"linear-gradient(90deg,#f87171,#ef4444)"}}/>
+                    </div>
+                    <span style={{fontSize:12,fontWeight:700,color:e.amount>=0?C.green:C.red,minWidth:72,textAlign:"right"}}>{e.amount>=0?"+":""}${Math.abs(e.amount).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+                    <button onClick={()=>setPnlLog(p=>p.filter(x=>x.month!==e.month))} style={{background:"none",border:"none",cursor:"pointer",color:C.dim,fontSize:11}}>🗑</button>
+                  </div>;
+                })}
+              </div>
+            </>}
+          </div>
+          </>}
+        </div>}
+
+      </div>
+
+      {/* 백업 모달 */}
+      {showBackup&&<div style={{position:"fixed",inset:0,zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.75)",backdropFilter:"blur(4px)"}}
+        onClick={e=>{if(e.target===e.currentTarget)setShowBackup(false);}}>
+        <div style={{background:C.bg2,border:`1px solid ${C.border2}`,borderRadius:18,padding:28,width:"min(440px,96vw)",maxHeight:"90vh",overflowY:"auto"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+            <span style={{fontSize:16,fontWeight:800,color:"#f1f5f9"}}>💾 백업 / 복원</span>
+            <button onClick={()=>setShowBackup(false)} style={{background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:22}}>✕</button>
+          </div>
+          {importMsg&&<div style={{background:importMsg.startsWith("✅")?"#052e16":"#2d0a0a",border:`1px solid ${importMsg.startsWith("✅")?"#166534":"#7f1d1d"}`,borderRadius:10,padding:"12px 16px",marginBottom:16,fontSize:13,color:importMsg.startsWith("✅")?C.green:C.red}}>
+            {importMsg}<button onClick={()=>setImportMsg("")} style={{float:"right",background:"none",border:"none",cursor:"pointer",color:C.muted}}>✕</button>
+          </div>}
+          <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:12,padding:18,marginBottom:12}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.purple,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>📤 백업 (Excel)</div>
+            <div style={{fontSize:12,color:C.muted,marginBottom:4}}>거래내역·평가액·월별손익·설정값을 <span style={{color:C.green,fontWeight:700}}>Excel 1개</span>로 저장</div>
+            <div style={{fontSize:11,color:C.muted,marginBottom:12}}>📄 주식트래커_백업_{today2}.xlsx (4개 시트)</div>
+            <button onClick={()=>{exportXlsx({trades,evalLog,pnlLog,evalAccounts,totalInvestInput,targetRate,spyBuyPrice,today:today2});setImportMsg("✅ 백업 완료!");}}
+              style={{width:"100%",padding:"12px",borderRadius:10,border:"none",cursor:"pointer",fontSize:14,fontWeight:700,background:`linear-gradient(135deg,${C.purple},${C.purpleL})`,color:"#fff"}}>
+              ⬇ 백업 다운로드
+            </button>
+          </div>
+          <div style={{background:C.bg3,border:`1px solid ${C.border}`,borderRadius:12,padding:18}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.purple,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>📥 복원 (Excel)</div>
+            <div style={{display:"flex",gap:8,marginBottom:10}}>
+              {[["merge","병합"],["replace","교체"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setImportMode(v)}
+                  style={{flex:1,padding:"7px",borderRadius:8,border:`1px solid ${importMode===v?C.purple:C.border}`,cursor:"pointer",fontSize:12,fontWeight:600,
+                    background:importMode===v?"#1e1b4b":C.bg2,color:importMode===v?"#a5b4fc":C.muted}}>
+                  {importMode===v?"● ":"○ "}{l}</button>
+              ))}
+            </div>
+            {importMode==="replace"&&<div style={{background:"#2d1a00",border:"1px solid #92400e",borderRadius:8,padding:"9px 12px",marginBottom:10,fontSize:12,color:C.yellow}}>⚠ 기존 데이터가 삭제됩니다.</div>}
+            <button onClick={()=>fileRef.current?.click()}
+              style={{width:"100%",padding:"12px",borderRadius:10,border:`1px solid ${C.purple}`,cursor:"pointer",fontSize:14,fontWeight:700,background:"transparent",color:"#a5b4fc"}}>
+              📂 Excel 파일 선택
+            </button>
+            <input ref={fileRef} type="file" accept=".xlsx" onChange={e=>{
+              const file=e.target.files?.[0];if(!file)return;
+              importXlsx(file,{setTrades,setEvalLog,setPnlLog,setEvalAccounts,setTotalInvestInput,setTargetRate,setSpyBuyPrice,importMode,setImportMsg});
+              e.target.value="";
+            }} style={{display:"none"}}/>
+          </div>
+        </div>
+      </div>}
+
+    </div>
+  );
+}
+
+window.ReactDOM.createRoot(document.getElementById('root')).render(window.React.createElement(ErrorBoundary, null, window.React.createElement(App)));
+document.getElementById('loading').style.display='none';
+
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('./sw.js').catch(function(e){ console.log('SW failed:', e); });
+      });
+    }
+  </script>
+</body>
+</html>
